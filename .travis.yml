@@ -36,7 +36,7 @@ matrix:
 env:
   global:
     # can be "stable", or anything that can be used with git checkout
-    - VALIDATOR_VERSION="8887074e5f5f48a768842ffcf96fb2952dbe0e38"
+    - VALIDATOR_VERSION="nirs"
     # can be any branch of MNE-Python (e.g., "maint/0.18", "master", ...)
 
 before_install:
@@ -66,7 +66,7 @@ install:
           npm install -g bids-validator
       else
           pushd ~
-          git clone https://github.com/bids-standard/bids-validator
+          git clone https://github.com/rob-luke/bids-validator.git
           cd bids-validator
           git checkout $VALIDATOR_VERSION
           yarn

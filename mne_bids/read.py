@@ -30,7 +30,7 @@ reader = {'.con': io.read_raw_kit, '.sqd': io.read_raw_kit,
           '.fif': io.read_raw_fif, '.pdf': io.read_raw_bti,
           '.ds': io.read_raw_ctf, '.vhdr': io.read_raw_brainvision,
           '.edf': io.read_raw_edf, '.bdf': io.read_raw_bdf,
-          '.set': io.read_raw_eeglab}
+          '.nirx': io.read_raw_nirx, '.set': io.read_raw_eeglab}
 
 
 def _read_raw(raw_fpath, electrode=None, hsp=None, hpi=None, config=None,

@@ -49,9 +49,13 @@ allowed_extensions_ieeg = ['.vhdr',  # BrainVision, accompanied by .vmrk, .eeg
                            '.nwb',  # Neurodata without borders
                            ]
 
+allowed_extensions_nirs = ['.nirx',  # NIRX
+                           ]
+
 ALLOWED_EXTENSIONS = {'meg': allowed_extensions_meg,
                       'eeg': allowed_extensions_eeg,
-                      'ieeg': allowed_extensions_ieeg}
+                      'ieeg': allowed_extensions_ieeg,
+                      'nirs': allowed_extensions_nirs}
 
 
 # mapping subject information back to mne-python

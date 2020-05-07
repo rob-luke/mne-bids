@@ -28,6 +28,7 @@ except ImportError:
     from mne._digitization._utils import _get_fid_coords
 from mne.channels.channels import _unit2human
 from mne.utils import check_version, has_nibabel, _check_ch_locs, warn
+from mne.io.nirx.nirx import RawNIRX
 
 from mne_bids.pick import coil_type
 from mne_bids.utils import (_write_json, _write_tsv, _read_events, _mkdir_p,
@@ -590,6 +591,8 @@ def _sidecar_json(raw, task, manufacturer, fname, kind, overwrite=False,
                       if ch['kind'] == FIFF.FIFFV_MISC_CH])
     n_stimchan = len([ch for ch in raw.info['chs']
                       if ch['kind'] == FIFF.FIFFV_STIM_CH]) - n_ignored
+    n_nirschan = len([ch for ch in raw.info['chs']
+                      if ch['kind'] == FIFF.FIFFV_FNIRS_CH])
 
     # Define modality-specific JSON dictionaries
     ch_info_json_common = [
@@ -611,6 +614,8 @@ def _sidecar_json(raw, task, manufacturer, fname, kind, overwrite=False,
         ('EEGGround', 'n/a'),
         ('EEGPlacementScheme', _infer_eeg_placement_scheme(raw)),
         ('Manufacturer', manufacturer)]
+    ch_info_json_nirs = [
+        ('Manufacturer', manufacturer)]
     ch_info_json_ieeg = [
         ('iEEGReference', 'n/a'),
         ('ECOGChannelCount', n_ecogchan),
@@ -621,6 +626,7 @@ def _sidecar_json(raw, task, manufacturer, fname, kind, overwrite=False,
         ('ECGChannelCount', n_ecgchan),
         ('EMGChannelCount', n_emgchan),
         ('MiscChannelCount', n_miscchan),
+        ('NIRSChannelCount', n_nirschan),
         ('TriggerChannelCount', n_stimchan)]
 
     # Stitch together the complete JSON dictionary
@@ -631,6 +637,8 @@ def _sidecar_json(raw, task, manufacturer, fname, kind, overwrite=False,
         append_kind_json = ch_info_json_eeg
     elif kind == 'ieeg':
         append_kind_json = ch_info_json_ieeg
+    elif kind == 'nirs':
+        append_kind_json = ch_info_json_nirs
 
     ch_info_json += append_kind_json
     ch_info_json += ch_info_ch_counts
@@ -1137,6 +1145,10 @@ def write_raw_bids(raw, bids_basename, bids_root, events_data=None,
     raw_fname = raw_fname.replace('.fdt', '.set')
     _, ext = _parse_ext(raw_fname, verbose=verbose)
 
+    if ext in [".pdf"]:  # This is the ext returned for unknown
+        if type(raw) is RawNIRX:
+            ext = ".nirx"
+
     if ext not in [this_ext for data_type in ALLOWED_EXTENSIONS
                    for this_ext in ALLOWED_EXTENSIONS[data_type]]:
         raise ValueError('Unrecognized file format %s' % ext)
@@ -1201,7 +1213,7 @@ def write_raw_bids(raw, bids_basename, bids_root, events_data=None,
         subject=subject_id, session=session_id, task=task, run=run,
         acquisition=acquisition, suffix='channels.tsv', prefix=data_path)
     if ext not in ['.fif', '.ds', '.vhdr', '.edf', '.bdf', '.set', '.con',
-                   '.sqd']:
+                   '.sqd', '.nirx']:
         bids_raw_folder = bids_fname.split('.')[0]
         bids_fname = op.join(bids_raw_folder, bids_fname)
 
@@ -1338,6 +1350,11 @@ def write_raw_bids(raw, bids_basename, bids_root, events_data=None,
     elif ext in ['.con', '.sqd']:
         copyfile_kit(raw_fname, bids_fname, subject_id, session_id,
                      task, run, raw._init_kwargs)
+    elif ext == '.nirx':
+        _write_raw_fif(raw, bids_fname.replace(ext, '_raw.fif'))
+        # This is a temporary hack until snirf io is implemented
+        os.rename(bids_fname.replace(ext, '_raw.fif'),
+                  bids_fname.replace(ext, '.snirf'))
     else:
         sh.copyfile(raw_fname, bids_fname)
 
