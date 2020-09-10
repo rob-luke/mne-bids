@@ -27,6 +27,8 @@ ieeg_manufacturers = {'.vhdr': 'BrainProducts', '.eeg': 'BrainProducts',
                       '.edf': 'n/a', '.set': 'n/a', '.fdt': 'n/a',
                       '.mef': 'n/a', '.nwb': 'n/a'}
 
+nirs_manufacturers = {'.snirf': 'SNIRF'}
+
 # file-extension map to mne-python readers
 reader = {'.con': io.read_raw_kit, '.sqd': io.read_raw_kit,
           '.fif': io.read_raw_fif, '.pdf': io.read_raw_bti,
@@ -39,6 +41,7 @@ MANUFACTURERS = dict()
 MANUFACTURERS.update(meg_manufacturers)
 MANUFACTURERS.update(eeg_manufacturers)
 MANUFACTURERS.update(ieeg_manufacturers)
+MANUFACTURERS.update(nirs_manufacturers)
 
 # List of synthetic channels by manufacturer that are to be excluded from the
 # channel list. Currently this is only for stimulus channels.
@@ -217,7 +220,9 @@ REFERENCES = {'mne-bids':
               'D\'Ambrosio, S., David, O., … Hermes, D. (2019). iEEG-BIDS, '
               'extending the Brain Imaging Data Structure specification '
               'to human intracranial electrophysiology. Scientific Data, '
-              '6, 102. https://doi.org/10.1038/s41597-019-0105-7'}
+              '6, 102. https://doi.org/10.1038/s41597-019-0105-7',
+              'nirs':
+              'Nothing yet'}
 
 
 # Mapping subject information between MNE-BIDS and MNE-Python.

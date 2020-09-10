@@ -66,7 +66,7 @@ def _get_ch_type_mapping(fro='mne', to='bids'):
     if fro == 'mne' and to == 'bids':
         mapping = dict(eeg='EEG', misc='MISC', stim='TRIG', emg='EMG',
                        ecog='ECOG', seeg='SEEG', eog='EOG', ecg='ECG',
-                       resp='RESP',
+                       resp='RESP', fnirs_cw_amplitude='NIRS',
                        # MEG channels
                        meggradaxial='MEGGRADAXIAL', megmag='MEGMAG',
                        megrefgradaxial='MEGREFGRADAXIAL',
@@ -75,7 +75,7 @@ def _get_ch_type_mapping(fro='mne', to='bids'):
     elif fro == 'bids' and to == 'mne':
         mapping = dict(EEG='eeg', MISC='misc', TRIG='stim', EMG='emg',
                        ECOG='ecog', SEEG='seeg', EOG='eog', ECG='ecg',
-                       RESP='resp',
+                       RESP='resp', NIRS='fnirs_cw_amplitude',
                        # No MEG channels for now
                        # Many to one mapping
                        VEOG='eog', HEOG='eog')

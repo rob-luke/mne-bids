@@ -576,7 +576,7 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
         append_datatype_json = ch_info_json_eeg
     elif datatype == 'ieeg':
         append_datatype_json = ch_info_json_ieeg
-    elif kind == 'nirs':
+    elif datatype == 'nirs':
         append_datatype_json = ch_info_json_nirs
 
     ch_info_json += append_datatype_json
@@ -1145,6 +1145,8 @@ def write_raw_bids(raw, bids_path, events_data=None,
         copyfile_kit(raw_fname, bids_path.fpath, bids_path.subject,
                      bids_path.session, bids_path.task, bids_path.run,
                      raw._init_kwargs)
+    elif ext == '.snirf':
+        print("TODO: what to do here?")
     else:
         sh.copyfile(raw_fname, bids_path)
 
