@@ -62,6 +62,7 @@ allowed_extensions_ieeg = ['.vhdr',  # BrainVision, accompanied by .vmrk, .eeg
                            ]
 
 allowed_extensions_nirs = ['.nirx',  # NIRX
+                           ]
 
 ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,
                                'eeg': allowed_extensions_eeg,
