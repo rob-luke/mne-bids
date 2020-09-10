@@ -32,7 +32,7 @@ reader = {'.con': io.read_raw_kit, '.sqd': io.read_raw_kit,
           '.fif': io.read_raw_fif, '.pdf': io.read_raw_bti,
           '.ds': io.read_raw_ctf, '.vhdr': io.read_raw_brainvision,
           '.edf': io.read_raw_edf, '.bdf': io.read_raw_bdf,
-          '.set': io.read_raw_eeglab}
+          '.set': io.read_raw_eeglab, '.snirf': io.read_raw_snirf}
 
 # Merge the manufacturer dictionaries in a python2 / python3 compatible way
 MANUFACTURERS = dict()
@@ -61,7 +61,7 @@ allowed_extensions_ieeg = ['.vhdr',  # BrainVision, accompanied by .vmrk, .eeg
                            '.nwb',  # Neurodata without borders
                            ]
 
-allowed_extensions_nirs = ['.snirf',  # NIRX
+allowed_extensions_nirs = ['.snirf',  # SNIRF
                            ]
 
 ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,

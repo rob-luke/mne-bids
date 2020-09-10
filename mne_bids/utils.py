@@ -99,7 +99,7 @@ def _handle_datatype(raw):
         datatype = 'ieeg'
     elif 'eeg' in raw:
         datatype = 'eeg'
-    elif 'fnirs_raw' in raw:
+    elif 'fnirs_cw_amplitude' in raw:
         datatype = 'nirs'
     else:
         raise ValueError('Neither MEG/EEG/iEEG channels found in data.'

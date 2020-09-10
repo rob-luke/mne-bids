@@ -965,7 +965,7 @@ def write_raw_bids(raw, bids_path, events_data=None,
 
     if ext in [".pdf"]:  # This is the ext returned for unknown
         if type(raw) is RawNIRX:
-            ext = ".nirx"
+            ext = ".snirf"
 
     if ext not in [this_ext for data_type in ALLOWED_DATATYPE_EXTENSIONS
                    for this_ext in ALLOWED_DATATYPE_EXTENSIONS[data_type]]:
