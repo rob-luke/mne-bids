@@ -24,6 +24,7 @@ from mne_bids.utils import _extract_landmarks, _get_ch_type_mapping
 from mne_bids.path import (BIDSPath, _parse_ext, _find_matching_sidecar,
                            _infer_datatype)
 
+
 def _read_raw(raw_fpath, electrode=None, hsp=None, hpi=None,
               allow_maxshield=False, config=None, verbose=None, **kwargs):
     """Read a raw file into MNE, making inferences based on extension."""
