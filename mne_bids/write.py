@@ -85,6 +85,8 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
                     stim='Trigger',
                     eeg='ElectroEncephaloGram',
                     ecog='Electrocorticography',
+                    fnirs_cw_amplitude='Near Infrared Spectroscopy'
+                                       '(continuous wave)',
                     seeg='StereoEEG',
                     ecg='ElectroCardioGram',
                     eog='ElectroOculoGram',
@@ -119,6 +121,8 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
     # default to 'n/a' for status description
     # XXX: improve with API to modify the description
     status_description = ['n/a'] * len(status)
+
+    # TODO: Add NIRS source, detector, wavelength
 
     ch_data = OrderedDict([
         ('name', raw.info['ch_names']),
