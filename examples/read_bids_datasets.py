@@ -24,13 +24,10 @@ and to display the data that is saved within the accompanying sidecars.
 
 ###############################################################################
 # We are importing everything we need for this example:
-import os
-
-import mne
 from mne.datasets import somato
 
-from mne_bids import make_bids_basename, read_raw_bids
-from mne_bids.utils import print_dir_tree
+from mne_bids import (BIDSPath, read_raw_bids,
+                      print_dir_tree)
 
 ###############################################################################
 # We will be using the `MNE somato data <mne_somato_data_>`_, which
@@ -38,26 +35,22 @@ from mne_bids.utils import print_dir_tree
 # For more information, you can checkout the
 # respective :ref:`example <ex-convert-mne-sample>`.
 
-# get MNE directory w/ example data
-mne_dir = mne.get_config('MNE_DATASETS_SAMPLE_PATH')
-
 ###############################################################################
 # Step 1: Download/Get a BIDS dataset
 # -----------------------------------
 #
 # Get the MNE somato data
 bids_root = somato.data_path()
-somato_raw_fname = os.path.join(bids_root, 'sub-01', 'meg',
-                                'sub-01_task-somato_meg.fif')
-
 subject_id = '01'
 task = 'somato'
-kind = "meg"
+datatype = 'meg'
 
-bids_basename = make_bids_basename(subject=subject_id, task=task)
+bids_path = BIDSPath(subject=subject_id, task=task,
+                     datatype=datatype, suffix=datatype,
+                     root=bids_root)
 
 # bids basename is nicely formatted
-print(bids_basename)
+print(bids_path)
 
 ###############################################################################
 # Print the directory tree
@@ -69,8 +62,7 @@ print_dir_tree(bids_root)
 #
 # Let's read in the dataset and show off a few features of the
 # loading function `read_raw_bids`. Note, this is just one line of code.
-bids_fname = bids_basename + "_{}.fif".format(kind)
-raw = read_raw_bids(bids_fname, bids_root, verbose=True)
+raw = read_raw_bids(bids_path=bids_path, verbose=True)
 
 ###############################################################################
 # `raw.info` has the basic subject metadata

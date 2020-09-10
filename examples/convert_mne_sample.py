@@ -1,4 +1,6 @@
 """
+.. currentmodule:: mne_bids
+
 .. _ex-convert-mne-sample:
 
 ==========================================
@@ -27,8 +29,8 @@ import os.path as op
 import mne
 from mne.datasets import sample
 
-from mne_bids import write_raw_bids, read_raw_bids, make_bids_basename
-from mne_bids.utils import print_dir_tree
+from mne_bids import (write_raw_bids, read_raw_bids,
+                      BIDSPath, print_dir_tree)
 
 ###############################################################################
 # Now we can read the MNE sample data. We define an `event_id` based on our
@@ -60,9 +62,11 @@ output_path = op.join(data_path, '..', 'MNE-sample-data-bids')
 # a new BIDS name for it, and then run the automatic BIDS conversion.
 
 raw = mne.io.read_raw_fif(raw_fname)
-bids_basename = make_bids_basename(subject='01', session='01',
-                                   task='audiovisual', run='01')
-write_raw_bids(raw, bids_basename, output_path, events_data=events_data,
+raw.info['line_freq'] = 60  # specify power line frequency as required by BIDS
+
+bids_path = BIDSPath(subject='01', session='01',
+                     task='audiovisual', run='01', root=output_path)
+write_raw_bids(raw, bids_path, events_data=events_data,
                event_id=event_id, overwrite=True)
 
 ###############################################################################
@@ -75,8 +79,7 @@ print_dir_tree(output_path)
 # packages can automate your workflow. For example, reading the data back
 # into MNE-Python can easily be done using :func:`read_raw_bids`.
 
-bids_fname = bids_basename + '_meg.fif'
-raw = read_raw_bids(bids_fname, output_path)
+raw = read_raw_bids(bids_path=bids_path)
 
 ###############################################################################
 # The resulting data is already in a convenient form to create epochs and
@@ -85,3 +88,12 @@ raw = read_raw_bids(bids_fname, output_path)
 events, event_id = mne.events_from_annotations(raw)
 epochs = mne.Epochs(raw, events, event_id)
 epochs['Auditory'].average().plot()
+
+###############################################################################
+# The README created by :func:`write_raw_bids` also takes care of the citation
+# for mne-bids. If you are preparing a manuscript, please make sure to also
+# cite MNE-BIDS there.
+readme = op.join(output_path, 'README')
+with open(readme, 'r') as fid:
+    text = fid.read()
+print(text)

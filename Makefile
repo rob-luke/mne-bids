@@ -23,7 +23,10 @@ clean-ctags:
 clean-cache:
 	find . -name "__pycache__" | xargs rm -rf
 
-clean: clean-build clean-pyc clean-so clean-ctags clean-cache
+clean-e:
+	find . -name "*-e" | xargs rm -rf
+
+clean: clean-build clean-pyc clean-so clean-ctags clean-cache clean-e
 
 inplace:
 	$(PYTHON) setup.py develop
@@ -33,7 +36,7 @@ test: inplace check-manifest
 	$(PYTESTS) mne_bids
 
 test-doc:
-	$(PYTESTS) --doctest-modules --doctest-ignore-import-errors
+	$(PYTESTS) --doctest-modules --doctest-ignore-import-errors mne_bids
 
 test-coverage:
 	rm -rf coverage .coverage

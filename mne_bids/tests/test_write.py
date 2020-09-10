@@ -39,13 +39,16 @@ from mne.io import anonymize_info
 from mne.io.constants import FIFF
 from mne.io.kit.kit import get_kit_info
 
-from mne_bids import (write_raw_bids, read_raw_bids, make_bids_basename,
-                      make_bids_folders, write_anat, make_dataset_description)
-from mne_bids.write import (_stamp_to_dt, _get_anonymization_daysback,
+from mne_bids import (write_raw_bids, read_raw_bids, BIDSPath,
+                      write_anat, make_dataset_description,
+                      mark_bad_channels)
+from mne_bids.utils import (_stamp_to_dt, _get_anonymization_daysback,
                             get_anonymization_daysback)
 from mne_bids.tsv_handler import _from_tsv, _to_tsv
-from mne_bids.utils import _find_matching_sidecar
+from mne_bids.utils import _update_sidecar
+from mne_bids.path import _find_matching_sidecar
 from mne_bids.pick import coil_type
+from mne_bids.config import REFERENCES
 
 base_path = op.join(op.dirname(mne.__file__), 'io')
 subject_id = '01'
@@ -56,10 +59,10 @@ acq = '01'
 run2 = '02'
 task = 'testing'
 
-bids_basename = make_bids_basename(
+_bids_path = BIDSPath(
     subject=subject_id, session=session_id, run=run, acquisition=acq,
     task=task)
-bids_basename_minimal = make_bids_basename(subject=subject_id, task=task)
+_bids_path_minimal = BIDSPath(subject=subject_id, task=task)
 
 warning_str = dict(
     channel_unit_changed='ignore:The unit for chann*.:RuntimeWarning:mne',
@@ -68,6 +71,25 @@ warning_str = dict(
     nasion_not_found='ignore:.*nasion not found:RuntimeWarning:mne',
     annotations_omitted='ignore:Omitted .* annot.*:RuntimeWarning:mne',
 )
+
+
+def _wrap_read_raw(read_raw):
+    def fn(fname, *args, **kwargs):
+        raw = read_raw(fname, *args, **kwargs)
+        raw.info['line_freq'] = 60
+        return raw
+    return fn
+
+
+_read_raw_fif = _wrap_read_raw(mne.io.read_raw_fif)
+_read_raw_ctf = _wrap_read_raw(mne.io.read_raw_ctf)
+_read_raw_kit = _wrap_read_raw(mne.io.read_raw_kit)
+_read_raw_bti = _wrap_read_raw(mne.io.read_raw_bti)
+_read_raw_edf = _wrap_read_raw(mne.io.read_raw_edf)
+_read_raw_bdf = _wrap_read_raw(mne.io.read_raw_bdf)
+_read_raw_eeglab = _wrap_read_raw(mne.io.read_raw_eeglab)
+_read_raw_brainvision = _wrap_read_raw(mne.io.read_raw_brainvision)
+
 
 # WINDOWS issues:
 # the bids-validator development version does not work properly on Windows as
@@ -80,37 +102,104 @@ warning_str = dict(
 @pytest.fixture(scope="session")
 def _bids_validate():
     """Fixture to run BIDS validator."""
-    shell = False
-    bids_validator_exe = ['bids-validator', '--config.error=41',
-                          '--config.error=41']
+    vadlidator_args = ['--config.error=41']
+    exe = os.getenv('VALIDATOR_EXECUTABLE', 'bids-validator')
+
     if platform.system() == 'Windows':
         shell = True
-        exe = os.getenv('VALIDATOR_EXECUTABLE', 'n/a')
-        if 'VALIDATOR_EXECUTABLE' != 'n/a':
-            bids_validator_exe = ['node', exe]
+    else:
+        shell = False
+
+    bids_validator_exe = [exe, *vadlidator_args]
 
     def _validate(bids_root):
-        cmd = bids_validator_exe + [bids_root]
+        cmd = [*bids_validator_exe, bids_root]
         run_subprocess(cmd, shell=shell)
 
     return _validate
 
 
-def _test_anonymize(raw, bids_basename, events_fname=None, event_id=None):
+def _test_anonymize(raw, bids_path, events_fname=None, event_id=None):
     bids_root = _TempDir()
-    write_raw_bids(raw, bids_basename, bids_root,
-                   events_data=events_fname,
+    bids_path = _bids_path.copy().update(root=bids_root)
+    write_raw_bids(raw, bids_path, events_data=events_fname,
                    event_id=event_id, anonymize=dict(daysback=33000),
                    overwrite=False)
-    scans_tsv = make_bids_basename(
-        subject=subject_id, session=session_id, suffix='scans.tsv',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01'))
+    scans_tsv = BIDSPath(
+        subject=subject_id, session=session_id,
+        suffix='scans', extension='.tsv', root=bids_root)
     data = _from_tsv(scans_tsv)
     if data['acq_time'] is not None and data['acq_time'][0] != 'n/a':
         assert datetime.strptime(data['acq_time'][0],
                                  '%Y-%m-%dT%H:%M:%S').year < 1925
 
     return bids_root
+
+
+def test_write_correct_inputs():
+    """Test that inputs of write_raw_bids is correct."""
+    data_path = testing.data_path()
+    raw_fname = op.join(data_path, 'MEG', 'sample',
+                        'sample_audvis_trunc_raw.fif')
+    raw = _read_raw_fif(raw_fname)
+
+    bids_path_str = 'sub-01_ses-01_meg.fif'
+    with pytest.raises(RuntimeError, match='"bids_path" must be a '
+                                           'BIDSPath object'):
+        write_raw_bids(raw, bids_path_str)
+
+    bids_path = _bids_path.copy().update(root=None)
+    with pytest.raises(
+            ValueError,
+            match='The root of the "bids_path" must be set'):
+        write_raw_bids(raw, bids_path)
+
+
+def test_make_dataset_description():
+    """Test making a dataset_description.json."""
+    tmp_dir = _TempDir()
+    with pytest.raises(ValueError, match='`dataset_type` must be either "raw" '
+                                         'or "derivative."'):
+        make_dataset_description(path=tmp_dir, name='tst', dataset_type='src')
+
+    make_dataset_description(path=tmp_dir, name='tst')
+
+    with open(op.join(tmp_dir, 'dataset_description.json'), 'r') as fid:
+        dataset_description_json = json.load(fid)
+        assert dataset_description_json["Authors"] == \
+            ["Please cite MNE-BIDS in your publication before removing this "
+             "(citations in README)"]
+
+    make_dataset_description(
+        path=tmp_dir, name='tst', authors='MNE B., MNE P.',
+        funding='GSOC2019, GSOC2021',
+        references_and_links='https://doi.org/10.21105/joss.01896',
+        dataset_type='derivative', overwrite=False, verbose=True
+    )
+
+    with open(op.join(tmp_dir, 'dataset_description.json'), 'r') as fid:
+        dataset_description_json = json.load(fid)
+        assert dataset_description_json["Authors"] == \
+            ["Please cite MNE-BIDS in your publication before removing this "
+             "(citations in README)"]
+
+    make_dataset_description(
+        path=tmp_dir, name='tst2', authors='MNE B., MNE P.',
+        funding='GSOC2019, GSOC2021',
+        references_and_links='https://doi.org/10.21105/joss.01896',
+        dataset_type='derivative', overwrite=True, verbose=True
+    )
+
+    with open(op.join(tmp_dir, 'dataset_description.json'), 'r') as fid:
+        dataset_description_json = json.load(fid)
+        assert dataset_description_json["Authors"] == ['MNE B.', 'MNE P.']
+
+    with pytest.raises(ValueError, match='Previous BIDS version used'):
+        version = make_dataset_description.__globals__['BIDS_VERSION']
+        make_dataset_description.__globals__['BIDS_VERSION'] = 'old'
+        make_dataset_description(path=tmp_dir, name='tst')
+        # put version back so that it doesn't cause issues down the road
+        make_dataset_description.__globals__['BIDS_VERSION'] = version
 
 
 def test_stamp_to_dt():
@@ -130,7 +219,7 @@ def test_get_anonymization_daysback():
     data_path = testing.data_path()
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     daysback_min, daysback_max = _get_anonymization_daysback(raw)
     # max_val off by 1 on Windows for some reason
     assert abs(daysback_min - 28461) < 2 and abs(daysback_max - 36880) < 2
@@ -152,12 +241,30 @@ def test_get_anonymization_daysback():
             get_anonymization_daysback([raw, raw2, raw4])
 
 
+def test_create_fif(_bids_validate):
+    """Test functionality for very short raw file created from data."""
+    out_dir = _TempDir()
+    bids_root = _TempDir()
+    bids_path = _bids_path.copy().update(root=bids_root)
+    sfreq, n_points = 1024., int(1e6)
+    info = mne.create_info(['ch1', 'ch2', 'ch3', 'ch4', 'ch5'], sfreq,
+                           ['seeg'] * 5)
+    rng = np.random.RandomState(99)
+    raw = mne.io.RawArray(rng.random((5, n_points)) * 1e-6, info)
+    raw.info['line_freq'] = 60
+    raw.save(op.join(out_dir, 'test-raw.fif'))
+    raw = _read_raw_fif(op.join(out_dir, 'test-raw.fif'))
+    write_raw_bids(raw, bids_path, verbose=False, overwrite=True)
+    _bids_validate(bids_root)
+
+
 @requires_version('pybv', '0.2.0')
 @pytest.mark.filterwarnings(warning_str['annotations_omitted'])
 @pytest.mark.filterwarnings(warning_str['channel_unit_changed'])
 def test_fif(_bids_validate):
     """Test functionality of the write_raw_bids conversion for fif."""
     bids_root = _TempDir()
+    bids_path = _bids_path.copy().update(root=bids_root, datatype='meg')
     data_path = testing.data_path()
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
@@ -167,7 +274,7 @@ def test_fif(_bids_validate):
     events_fname = op.join(data_path, 'MEG', 'sample',
                            'sample_audvis_trunc_raw-eve.fif')
 
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     # add data in as a montage for MEG
     ch_names = raw.ch_names
     elec_locs = np.random.random((len(ch_names), 3)).tolist()
@@ -175,16 +282,16 @@ def test_fif(_bids_validate):
     meg_montage = mne.channels.make_dig_montage(ch_pos=ch_pos,
                                                 coord_frame='head')
     raw.set_montage(meg_montage)
-    write_raw_bids(raw, bids_basename, bids_root, events_data=events_fname,
+
+    write_raw_bids(raw, bids_path, events_data=events_fname,
                    event_id=event_id, overwrite=False)
 
     # Read the file back in to check that the data has come through cleanly.
     # Events and bad channel information was read through JSON sidecar files.
     with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
-        read_raw_bids(bids_basename + '_meg.fif', bids_root,
-                      extra_params=dict(foo='bar'))
+        read_raw_bids(bids_path=bids_path, extra_params=dict(foo='bar'))
 
-    raw2 = read_raw_bids(bids_basename + '_meg.fif', bids_root,
+    raw2 = read_raw_bids(bids_path=bids_path,
                          extra_params=dict(allow_maxshield=True))
     assert set(raw.info['bads']) == set(raw2.info['bads'])
     events, _ = mne.events_from_annotations(raw2)
@@ -197,14 +304,16 @@ def test_fif(_bids_validate):
                            for i in
                            mne.pick_types(raw.info, stim=True, meg=False)})
     bids_root = _TempDir()
+    bids_path.update(root=bids_root)
     with pytest.warns(RuntimeWarning, match='No events found or provided.'):
-        write_raw_bids(raw, bids_basename, bids_root, overwrite=False)
+        write_raw_bids(raw, bids_path, overwrite=False)
 
     _bids_validate(bids_root)
 
     # try with eeg data only (conversion to bv)
     bids_root = _TempDir()
-    raw = mne.io.read_raw_fif(raw_fname)
+    bids_path.update(root=bids_root)
+    raw = _read_raw_fif(raw_fname)
     raw.load_data()
     raw2 = raw.pick_types(meg=False, eeg=True, stim=True, eog=True, ecg=True)
     raw2.save(op.join(bids_root, 'test-raw.fif'), overwrite=True)
@@ -216,16 +325,20 @@ def test_fif(_bids_validate):
                         preload=True)
     with pytest.warns(RuntimeWarning,
                       match='Converting data files to BrainVision format'):
-        write_raw_bids(raw2, bids_basename, bids_root,
+        write_raw_bids(raw2, bids_path,
                        events_data=events_fname, event_id=event_id,
                        verbose=True, overwrite=False)
     bids_dir = op.join(bids_root, 'sub-%s' % subject_id,
                        'ses-%s' % session_id, 'eeg')
+    sidecar_basename = bids_path.copy()
     for sidecar in ['channels.tsv', 'eeg.eeg', 'eeg.json', 'eeg.vhdr',
                     'eeg.vmrk', 'events.tsv']:
-        assert op.isfile(op.join(bids_dir, bids_basename + '_' + sidecar))
+        suffix, extension = sidecar.split('.')
+        sidecar_basename.update(suffix=suffix, extension=extension)
+        assert op.isfile(op.join(bids_dir, sidecar_basename.basename))
 
-    raw2 = read_raw_bids(bids_basename + '_eeg.vhdr', bids_root)
+    bids_path.update(root=bids_root, datatype='eeg')
+    raw2 = read_raw_bids(bids_path=bids_path)
     os.remove(op.join(bids_root, 'test-raw.fif'))
 
     events2 = mne.find_events(raw2)
@@ -236,122 +349,183 @@ def test_fif(_bids_validate):
     _bids_validate(bids_root)
 
     # write the same data but pretend it is empty room data:
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     meas_date = raw.info['meas_date']
     if not isinstance(meas_date, datetime):
         meas_date = datetime.fromtimestamp(meas_date[0], tz=timezone.utc)
     er_date = meas_date.strftime('%Y%m%d')
-    er_bids_basename = 'sub-emptyroom_ses-{0}_task-noise'.format(str(er_date))
-    write_raw_bids(raw, er_bids_basename, bids_root, overwrite=False)
+    er_bids_path = BIDSPath(subject='emptyroom', session=er_date,
+                            task='noise', root=bids_root)
+    write_raw_bids(raw, er_bids_path, overwrite=False)
     assert op.exists(op.join(
         bids_root, 'sub-emptyroom', 'ses-{0}'.format(er_date), 'meg',
         'sub-emptyroom_ses-{0}_task-noise_meg.json'.format(er_date)))
 
+    _bids_validate(bids_root)
+
     # test that an incorrect date raises an error.
-    er_bids_basename_bad = 'sub-emptyroom_ses-19000101_task-noise'
+    er_bids_basename_bad = BIDSPath(subject='emptyroom', session='19000101',
+                                    task='noise', root=bids_root)
     with pytest.raises(ValueError, match='Date provided'):
-        write_raw_bids(raw, er_bids_basename_bad, bids_root, overwrite=False)
+        write_raw_bids(raw, er_bids_basename_bad, overwrite=False)
 
     # test that the acquisition time was written properly
-    scans_tsv = make_bids_basename(
-        subject=subject_id, session=session_id, suffix='scans.tsv',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01'))
+    scans_tsv = BIDSPath(
+        subject=subject_id, session=session_id,
+        suffix='scans', extension='.tsv', root=bids_root)
     data = _from_tsv(scans_tsv)
     assert data['acq_time'][0] == meas_date.strftime('%Y-%m-%dT%H:%M:%S')
 
     # give the raw object some fake participant data (potentially overwriting)
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     raw.info['subject_info'] = {'his_id': subject_id2,
                                 'birthday': (1993, 1, 26), 'sex': 1, 'hand': 2}
-    write_raw_bids(raw, bids_basename, bids_root, events_data=events_fname,
+    write_raw_bids(raw, bids_path, events_data=events_fname,
                    event_id=event_id, overwrite=True)
     # assert age of participant is correct
     participants_tsv = op.join(bids_root, 'participants.tsv')
     data = _from_tsv(participants_tsv)
     assert data['age'][data['participant_id'].index('sub-01')] == '9'
 
+    # check to make sure participant data is overwritten, but keeps the fields
+    data = _from_tsv(participants_tsv)
+    participant_idx = data['participant_id'].index(f'sub-{subject_id}')
+    # create a new test column in participants file tsv
+    data['subject_test_col1'] = ['n/a'] * len(data['participant_id'])
+    data['subject_test_col1'][participant_idx] = 'S'
+    data['test_col2'] = ['n/a'] * len(data['participant_id'])
+    orig_key_order = list(data.keys())
+    _to_tsv(data, participants_tsv)
+    # crate corresponding json entry
+    participants_json_fpath = op.join(bids_root, 'participants.json')
+    json_field = {
+        'Description': 'trial-outcome',
+        'Levels': {
+            'S': 'success',
+            'F': 'failure'
+        }
+    }
+    _update_sidecar(participants_json_fpath, 'subject_test_col1', json_field)
+    # bids root should still be valid because json reflects changes in tsv
+    _bids_validate(bids_root)
+    write_raw_bids(raw, bids_path, overwrite=True)
+    data = _from_tsv(participants_tsv)
+    with open(participants_json_fpath, 'r') as fin:
+        participants_json = json.load(fin)
+    assert 'subject_test_col1' in participants_json
+    assert data['age'][data['participant_id'].index('sub-01')] == '9'
+    assert data['subject_test_col1'][participant_idx] == 'S'
+    # in addition assert the original ordering of the new overwritten file
+    assert list(data.keys()) == orig_key_order
+
+    # if overwrite is False, then nothing should change from the above
+    with pytest.raises(FileExistsError, match='already exists'):
+        raw.info['subject_info'] = None
+        write_raw_bids(raw, bids_path, overwrite=False)
+    data = _from_tsv(participants_tsv)
+    with open(participants_json_fpath, 'r') as fin:
+        participants_json = json.load(fin)
+    assert 'subject_test_col1' in participants_json
+    assert data['age'][data['participant_id'].index('sub-01')] == '9'
+    assert data['subject_test_col1'][participant_idx] == 'S'
+    # in addition assert the original ordering of the new overwritten file
+    assert list(data.keys()) == orig_key_order
+
     # try and write preloaded data
-    raw = mne.io.read_raw_fif(raw_fname, preload=True)
+    raw = _read_raw_fif(raw_fname, preload=True)
     with pytest.raises(ValueError, match='preloaded'):
-        write_raw_bids(raw, bids_basename, bids_root,
-                       events_data=events_fname, event_id=event_id,
-                       overwrite=False)
+        write_raw_bids(raw, bids_path, events_data=events_fname,
+                       event_id=event_id, overwrite=False)
 
     # test anonymize
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     raw.anonymize()
 
     data_path2 = _TempDir()
     raw_fname2 = op.join(data_path2, 'sample_audvis_raw.fif')
     raw.save(raw_fname2)
 
-    bids_basename2 = bids_basename.replace(subject_id, subject_id2)
-    raw = mne.io.read_raw_fif(raw_fname2)
-    bids_output_path = write_raw_bids(raw, bids_basename2, bids_root,
+    # add some readme text
+    readme = op.join(bids_root, 'README')
+    with open(readme, 'w') as fid:
+        fid.write('Welcome to my dataset\n')
+
+    bids_path2 = bids_path.copy().update(subject=subject_id2)
+    raw = _read_raw_fif(raw_fname2)
+    bids_output_path = write_raw_bids(raw, bids_path2,
                                       events_data=events_fname,
                                       event_id=event_id, overwrite=False)
 
     # check that the overwrite parameters work correctly for the participant
     # data
     # change the gender but don't force overwrite.
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     raw.info['subject_info'] = {'his_id': subject_id2,
                                 'birthday': (1994, 1, 26), 'sex': 2, 'hand': 1}
     with pytest.raises(FileExistsError, match="already exists"):  # noqa: F821
-        write_raw_bids(raw, bids_basename2, bids_root,
+        write_raw_bids(raw, bids_path2,
                        events_data=events_fname, event_id=event_id,
                        overwrite=False)
+
+    # assert README has references in it
+    with open(readme, 'r') as fid:
+        text = fid.read()
+        assert 'Welcome to my dataset\n' in text
+        assert REFERENCES['mne-bids'] in text
+        assert REFERENCES['meg'] in text
+        assert REFERENCES['eeg'] not in text
+        assert REFERENCES['ieeg'] not in text
+
     # now force the overwrite
-    write_raw_bids(raw, bids_basename2, bids_root, events_data=events_fname,
+    write_raw_bids(raw, bids_path2, events_data=events_fname,
                    event_id=event_id, overwrite=True)
 
+    with open(readme, 'r') as fid:
+        text = fid.read()
+        assert 'Welcome to my dataset\n' in text
+        assert REFERENCES['mne-bids'] in text
+        assert REFERENCES['meg'] in text
+
     with pytest.raises(ValueError, match='raw_file must be'):
-        write_raw_bids('blah', bids_basename, bids_root)
-
-    bids_basename2 = 'sub-01_ses-01_xyz-01_run-01'
-    with pytest.raises(KeyError, match='Unexpected entity'):
-        write_raw_bids(raw, bids_basename2, bids_root)
-
-    bids_basename2 = 'sub-01_run-01_task-auditory'
-    with pytest.raises(ValueError, match='ordered correctly'):
-        write_raw_bids(raw, bids_basename2, bids_root, overwrite=True)
+        write_raw_bids('blah', bids_path)
 
     del raw._filenames
     with pytest.raises(ValueError, match='raw.filenames is missing'):
-        write_raw_bids(raw, bids_basename2, bids_root)
+        write_raw_bids(raw, bids_path2)
 
     _bids_validate(bids_root)
 
     assert op.exists(op.join(bids_root, 'participants.tsv'))
 
-    # asserting that single fif files do not include the part key
+    # asserting that single fif files do not include the split key
     files = glob(op.join(bids_output_path, 'sub-' + subject_id2,
                          'ses-' + subject_id2, 'meg', '*.fif'))
+    ii = 0
     for ii, FILE in enumerate(files):
-        assert 'part' not in FILE
+        assert 'split' not in FILE
     assert ii < 1
 
-    # check that split files have part key
-    raw = mne.io.read_raw_fif(raw_fname)
+    # check that split files have split key
+    raw = _read_raw_fif(raw_fname)
     data_path3 = _TempDir()
     raw_fname3 = op.join(data_path3, 'sample_audvis_raw.fif')
     raw.save(raw_fname3, buffer_size_sec=1.0, split_size='10MB',
              split_naming='neuromag', overwrite=True)
-    raw = mne.io.read_raw_fif(raw_fname3)
+    raw = _read_raw_fif(raw_fname3)
     subject_id3 = '03'
-    bids_basename3 = bids_basename.replace(subject_id, subject_id3)
-    bids_output_path = write_raw_bids(raw, bids_basename3, bids_root,
+    bids_path3 = bids_path.copy().update(subject=subject_id3)
+    bids_output_path = write_raw_bids(raw, bids_path3,
                                       overwrite=False)
     files = glob(op.join(bids_output_path, 'sub-' + subject_id3,
                          'ses-' + subject_id3, 'meg', '*.fif'))
     for FILE in files:
-        assert 'part' in FILE
+        assert 'split' in FILE
 
     # test unknown extension
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     raw._filenames = (raw.filenames[0].replace('.fif', '.foo'),)
     with pytest.raises(ValueError, match='Unrecognized file format'):
-        write_raw_bids(raw, bids_basename, bids_root)
+        write_raw_bids(raw, bids_path)
 
 
 @pytest.mark.skipif(LooseVersion(mne.__version__) < LooseVersion('0.20'),
@@ -359,6 +533,7 @@ def test_fif(_bids_validate):
 def test_fif_anonymize(_bids_validate):
     """Test write_raw_bids() with anonymization fif."""
     bids_root = _TempDir()
+    bids_path = _bids_path.copy().update(root=bids_root)
     data_path = testing.data_path()
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
@@ -369,42 +544,42 @@ def test_fif_anonymize(_bids_validate):
                            'sample_audvis_trunc_raw-eve.fif')
 
     # test keyword mne-bids anonymize
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     with pytest.raises(ValueError, match='`daysback` argument required'):
-        write_raw_bids(raw, bids_basename, bids_root,
-                       events_data=events_fname,
+        write_raw_bids(raw, bids_path, events_data=events_fname,
                        event_id=event_id,
                        anonymize=dict(),
                        overwrite=True)
 
     bids_root = _TempDir()
-    raw = mne.io.read_raw_fif(raw_fname)
+    bids_path.update(root=bids_root)
+    raw = _read_raw_fif(raw_fname)
     with pytest.warns(RuntimeWarning, match='daysback` is too small'):
-        write_raw_bids(raw, bids_basename, bids_root,
-                       events_data=events_fname,
+        write_raw_bids(raw, bids_path, events_data=events_fname,
                        event_id=event_id,
                        anonymize=dict(daysback=400),
                        overwrite=False)
 
     bids_root = _TempDir()
-    raw = mne.io.read_raw_fif(raw_fname)
+    bids_path.update(root=bids_root)
+    raw = _read_raw_fif(raw_fname)
     with pytest.raises(ValueError, match='`daysback` exceeds maximum value'):
-        write_raw_bids(raw, bids_basename, bids_root,
-                       events_data=events_fname,
+        write_raw_bids(raw, bids_path, events_data=events_fname,
                        event_id=event_id,
                        anonymize=dict(daysback=40000),
                        overwrite=False)
 
     bids_root = _TempDir()
-    raw = mne.io.read_raw_fif(raw_fname)
-    write_raw_bids(raw, bids_basename, bids_root,
-                   events_data=events_fname,
+    bids_path.update(root=bids_root)
+    raw = _read_raw_fif(raw_fname)
+    write_raw_bids(raw, bids_path, events_data=events_fname,
                    event_id=event_id,
                    anonymize=dict(daysback=30000, keep_his=True),
                    overwrite=False)
-    scans_tsv = make_bids_basename(
-        subject=subject_id, session=session_id, suffix='scans.tsv',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01'))
+    scans_tsv = BIDSPath(
+        subject=subject_id, session=session_id,
+        suffix='scans', extension='.tsv',
+        root=bids_root)
     data = _from_tsv(scans_tsv)
 
     # anonymize using MNE manually
@@ -428,50 +603,46 @@ def test_kit(_bids_validate):
     headshape_fname = op.join(data_path, 'test.hsp')
     event_id = dict(cond=1)
 
-    kit_bids_basename = bids_basename.replace('_acq-01', '')
+    kit_bids_path = _bids_path.copy().update(acquisition=None,
+                                             root=bids_root,
+                                             suffix='meg')
 
-    raw = mne.io.read_raw_kit(
+    raw = _read_raw_kit(
         raw_fname, mrk=hpi_fname, elp=electrode_fname,
         hsp=headshape_fname)
-    write_raw_bids(raw, kit_bids_basename, bids_root,
+    write_raw_bids(raw, kit_bids_path,
                    events_data=events_fname,
                    event_id=event_id, overwrite=False)
 
     _bids_validate(bids_root)
     assert op.exists(op.join(bids_root, 'participants.tsv'))
-
-    read_raw_bids(kit_bids_basename + '_meg.sqd', bids_root)
+    read_raw_bids(bids_path=kit_bids_path)
 
     # ensure the marker file is produced in the right place
-    marker_fname = make_bids_basename(
+    marker_fname = BIDSPath(
         subject=subject_id, session=session_id, task=task, run=run,
-        suffix='markers.sqd',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01', 'meg'))
+        suffix='markers', extension='.sqd',
+        root=bids_root)
     assert op.exists(marker_fname)
 
     # test anonymize
     if check_version('mne', '0.20'):
-        output_path = _test_anonymize(raw, kit_bids_basename,
+        output_path = _test_anonymize(raw, kit_bids_path,
                                       events_fname, event_id)
         _bids_validate(output_path)
     else:
         with pytest.raises(ValueError, match='MNE is too old.'):
-            output_path = _test_anonymize(raw, kit_bids_basename,
+            output_path = _test_anonymize(raw, kit_bids_path,
                                           events_fname, event_id)
 
     # ensure the channels file has no STI 014 channel:
-    channels_tsv = make_bids_basename(
-        subject=subject_id, session=session_id, task=task, run=run,
-        suffix='channels.tsv',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01', 'meg'))
+    channels_tsv = marker_fname.copy().update(datatype='meg',
+                                              suffix='channels',
+                                              extension='.tsv')
     data = _from_tsv(channels_tsv)
     assert 'STI 014' not in data['name']
 
     # ensure the marker file is produced in the right place
-    marker_fname = make_bids_basename(
-        subject=subject_id, session=session_id, task=task, run=run,
-        suffix='markers.sqd',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01', 'meg'))
     assert op.exists(marker_fname)
 
     # test attempts at writing invalid event data
@@ -479,49 +650,42 @@ def test_kit(_bids_validate):
     # make the data the wrong number of dimensions
     event_data_3d = np.atleast_3d(event_data)
     other_output_path = _TempDir()
+    bids_path = _bids_path.copy().update(root=other_output_path)
     with pytest.raises(ValueError, match='two dimensions'):
-        write_raw_bids(raw, bids_basename, other_output_path,
-                       events_data=event_data_3d, event_id=event_id,
-                       overwrite=True)
+        write_raw_bids(raw, bids_path, events_data=event_data_3d,
+                       event_id=event_id, overwrite=True)
     # remove 3rd column
     event_data = event_data[:, :2]
     with pytest.raises(ValueError, match='second dimension'):
-        write_raw_bids(raw, bids_basename, other_output_path,
-                       events_data=event_data, event_id=event_id,
-                       overwrite=True)
+        write_raw_bids(raw, bids_path, events_data=event_data,
+                       event_id=event_id, overwrite=True)
     # test correct naming of marker files
-    raw = mne.io.read_raw_kit(
+    raw = _read_raw_kit(
         raw_fname, mrk=[hpi_pre_fname, hpi_post_fname], elp=electrode_fname,
         hsp=headshape_fname)
-    write_raw_bids(raw,
-                   kit_bids_basename.replace('sub-01', 'sub-%s' % subject_id2),
-                   bids_root, events_data=events_fname, event_id=event_id,
-                   overwrite=False)
+    kit_bids_path.update(subject=subject_id2)
+    write_raw_bids(raw, kit_bids_path, events_data=events_fname,
+                   event_id=event_id, overwrite=False)
 
     _bids_validate(bids_root)
     # ensure the marker files are renamed correctly
-    marker_fname = make_bids_basename(
-        subject=subject_id2, session=session_id, task=task, run=run,
-        suffix='markers.sqd', acquisition='pre',
-        prefix=os.path.join(bids_root, 'sub-02', 'ses-01', 'meg'))
+    marker_fname.update(acquisition='pre', subject=subject_id2)
     info = get_kit_info(marker_fname, False)[0]
     assert info['meas_date'] == get_kit_info(hpi_pre_fname,
                                              False)[0]['meas_date']
-    marker_fname = marker_fname.replace('acq-pre', 'acq-post')
+    marker_fname.update(acquisition='post')
     info = get_kit_info(marker_fname, False)[0]
     assert info['meas_date'] == get_kit_info(hpi_post_fname,
                                              False)[0]['meas_date']
 
     # check that providing markers in the wrong order raises an error
-    raw = mne.io.read_raw_kit(
+    raw = _read_raw_kit(
         raw_fname, mrk=[hpi_post_fname, hpi_pre_fname], elp=electrode_fname,
         hsp=headshape_fname)
     with pytest.raises(ValueError, match='Markers'):
-        write_raw_bids(
-            raw,
-            kit_bids_basename.replace('sub-01', 'sub-%s' % subject_id2),
-            bids_root, events_data=events_fname, event_id=event_id,
-            overwrite=True)
+        write_raw_bids(raw, kit_bids_path.update(subject=subject_id2),
+                       events_data=events_fname, event_id=event_id,
+                       overwrite=True)
 
 
 @pytest.mark.filterwarnings(warning_str['meas_date_set_to_none'])
@@ -530,28 +694,29 @@ def test_ctf(_bids_validate):
     bids_root = _TempDir()
     data_path = op.join(testing.data_path(download=False), 'CTF')
     raw_fname = op.join(data_path, 'testdata_ctf.ds')
+    bids_path = _bids_path.copy().update(root=bids_root, datatype='meg')
 
-    raw = mne.io.read_raw_ctf(raw_fname)
-    with pytest.warns(RuntimeWarning, match='No line frequency'):
-        write_raw_bids(raw, bids_basename, bids_root=bids_root)
+    raw = _read_raw_ctf(raw_fname)
+    raw.info['line_freq'] = 60
+    write_raw_bids(raw, bids_path)
 
     _bids_validate(bids_root)
     with pytest.warns(RuntimeWarning, match='Did not find any events'):
-        raw = read_raw_bids(bids_basename + '_meg.ds', bids_root,
+        raw = read_raw_bids(bids_path=bids_path,
                             extra_params=dict(clean_names=False))
 
     # test to check that running again with overwrite == False raises an error
     with pytest.raises(FileExistsError, match="already exists"):  # noqa: F821
-        write_raw_bids(raw, bids_basename, bids_root=bids_root)
+        write_raw_bids(raw, bids_path)
 
     assert op.exists(op.join(bids_root, 'participants.tsv'))
 
     # test anonymize
     if check_version('mne', '0.20'):
-        raw = mne.io.read_raw_ctf(raw_fname)
+        raw = _read_raw_ctf(raw_fname)
         with pytest.warns(RuntimeWarning,
                           match='Converting to FIF for anonymization'):
-            output_path = _test_anonymize(raw, bids_basename)
+            output_path = _test_anonymize(raw, bids_path)
         _bids_validate(output_path)
 
         raw.set_meas_date(None)
@@ -569,36 +734,36 @@ def test_bti(_bids_validate):
     config_fname = op.join(data_path, 'test_config_linux')
     headshape_fname = op.join(data_path, 'test_hs_linux')
 
-    raw = mne.io.read_raw_bti(raw_fname, config_fname=config_fname,
-                              head_shape_fname=headshape_fname)
+    raw = _read_raw_bti(raw_fname, config_fname=config_fname,
+                        head_shape_fname=headshape_fname)
+
+    bids_path = _bids_path.copy().update(root=bids_root, datatype='meg')
 
     # write the BIDS dataset description, then write BIDS files
     make_dataset_description(bids_root, name="BTi data")
-    write_raw_bids(raw, bids_basename, bids_root, verbose=True)
+    write_raw_bids(raw, bids_path, verbose=True)
 
     assert op.exists(op.join(bids_root, 'participants.tsv'))
     _bids_validate(bids_root)
 
-    raw = read_raw_bids(bids_basename + '_meg', bids_root)
+    raw = read_raw_bids(bids_path=bids_path)
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
-        read_raw_bids(bids_basename + '_meg', bids_root,
-                      extra_params=dict(foo='bar'))
+        read_raw_bids(bids_path=bids_path, extra_params=dict(foo='bar'))
 
     if check_version('mne', '0.20'):
         # test anonymize
-        raw = mne.io.read_raw_bti(raw_fname, config_fname=config_fname,
-                                  head_shape_fname=headshape_fname)
+        raw = _read_raw_bti(raw_fname, config_fname=config_fname,
+                            head_shape_fname=headshape_fname)
         with pytest.warns(RuntimeWarning,
                           match='Converting to FIF for anonymization'):
-            output_path = _test_anonymize(raw, bids_basename)
+            output_path = _test_anonymize(raw, bids_path)
         _bids_validate(output_path)
 
 
 # XXX: vhdr test currently passes only on MNE master. Skip until next release.
-# see: https://github.com/mne-tools/mne-python/pull/6558
-@pytest.mark.skipif(LooseVersion(mne.__version__) < LooseVersion('0.19'),
-                    reason='requires mne 0.19.dev0 or higher')
+@pytest.mark.skipif(LooseVersion(mne.__version__) < LooseVersion('0.21'),
+                    reason='requires mne 0.21.dev0 or higher')
 @pytest.mark.filterwarnings(warning_str['channel_unit_changed'])
 def test_vhdr(_bids_validate):
     """Test write_raw_bids conversion for BrainVision data."""
@@ -606,22 +771,25 @@ def test_vhdr(_bids_validate):
     data_path = op.join(base_path, 'brainvision', 'tests', 'data')
     raw_fname = op.join(data_path, 'test.vhdr')
 
-    raw = mne.io.read_raw_brainvision(raw_fname)
+    raw = _read_raw_brainvision(raw_fname)
 
     # inject a bad channel
     assert not raw.info['bads']
     injected_bad = ['FP1']
     raw.info['bads'] = injected_bad
 
+    bids_path = _bids_path.copy().update(root=bids_root)
+    bids_path_minimal = _bids_path_minimal.copy().update(root=bids_root,
+                                                         datatype='eeg')
+
     # write with injected bad channels
-    write_raw_bids(raw, bids_basename_minimal, bids_root, overwrite=False)
+    write_raw_bids(raw, bids_path_minimal, overwrite=False)
     _bids_validate(bids_root)
 
     # read and also get the bad channels
-    raw = read_raw_bids(bids_basename_minimal + '_eeg.vhdr', bids_root)
-
+    raw = read_raw_bids(bids_path=bids_path_minimal)
     with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
-        read_raw_bids(bids_basename_minimal + '_eeg.vhdr', bids_root,
+        read_raw_bids(bids_path=bids_path_minimal,
                       extra_params=dict(foo='bar'))
 
     # Check that injected bad channel shows up in raw after reading
@@ -630,37 +798,64 @@ def test_vhdr(_bids_validate):
 
     # Test that correct channel units are written ... and that bad channel
     # is in channels.tsv
-    channels_tsv_name = op.join(bids_root, 'sub-{}'.format(subject_id),
-                                'eeg', bids_basename_minimal + '_channels.tsv')
+    suffix, ext = 'channels', '.tsv'
+    channels_tsv_name = bids_path_minimal.copy().update(
+        suffix=suffix, extension=ext)
+
     data = _from_tsv(channels_tsv_name)
     assert data['units'][data['name'].index('FP1')] == 'µV'
     assert data['units'][data['name'].index('CP5')] == 'n/a'
     assert data['status'][data['name'].index(injected_bad[0])] == 'bad'
+    status_description = data['status_description']
+    assert status_description[data['name'].index(injected_bad[0])] == 'n/a'
 
     # check events.tsv is written
-    events_tsv_fname = channels_tsv_name.replace('channels', 'events')
+    events_tsv_fname = channels_tsv_name.update(suffix='events')
     assert op.exists(events_tsv_fname)
 
     # create another bids folder with the overwrite command and check
     # no files are in the folder
-    data_path = make_bids_folders(subject=subject_id, kind='eeg',
-                                  bids_root=bids_root, overwrite=True)
+    data_path = BIDSPath(subject=subject_id, datatype='eeg',
+                         root=bids_root).mkdir().directory
     assert len([f for f in os.listdir(data_path) if op.isfile(f)]) == 0
 
     # test anonymize and convert
     if check_version('mne', '0.20') and check_version('pybv', '0.2.0'):
-        raw = mne.io.read_raw_brainvision(raw_fname)
-        output_path = _test_anonymize(raw, bids_basename)
+        raw = _read_raw_brainvision(raw_fname)
+        output_path = _test_anonymize(raw, bids_path)
         _bids_validate(output_path)
 
     # Also cover iEEG
     # We use the same data and pretend that eeg channels are ecog
-    raw = mne.io.read_raw_brainvision(raw_fname)
+    raw = _read_raw_brainvision(raw_fname)
     raw.set_channel_types({raw.ch_names[i]: 'ecog'
                            for i in mne.pick_types(raw.info, eeg=True)})
     bids_root = _TempDir()
-    write_raw_bids(raw, bids_basename, bids_root, overwrite=False)
+    bids_path.update(root=bids_root)
+    write_raw_bids(raw, bids_path, overwrite=False)
     _bids_validate(bids_root)
+
+    # Test coords and impedance writing
+    # first read the data and set a montage
+    data_path = op.join(testing.data_path(), 'montage')
+    fname_vhdr = op.join(data_path, 'bv_dig_test.vhdr')
+    raw = _read_raw_brainvision(fname_vhdr, preload=False)
+    raw.set_channel_types({'HEOG': 'eog', 'VEOG': 'eog', 'ECG': 'ecg'})
+    fname_bvct = op.join(data_path, 'captrak_coords.bvct')
+    montage = mne.channels.read_dig_captrak(fname_bvct)
+    raw.set_montage(montage)
+
+    # convert to BIDS and check impedances
+    bids_root = _TempDir()
+    bids_path.update(root=bids_root)
+    write_raw_bids(raw, bids_path)
+    electrodes_fpath = _find_matching_sidecar(
+        bids_path.copy().update(root=bids_root),
+        suffix='electrodes', extension='.tsv')
+    tsv = _from_tsv(electrodes_fpath)
+    assert len(tsv.get('impedance', {})) > 0
+    assert tsv['impedance'][-3:] == ['n/a', 'n/a', 'n/a']
+    assert tsv['impedance'][:3] == ['5.0', '2.0', '4.0']
 
 
 @pytest.mark.filterwarnings(warning_str['nasion_not_found'])
@@ -670,101 +865,160 @@ def test_edf(_bids_validate):
     data_path = op.join(testing.data_path(), 'EDF')
     raw_fname = op.join(data_path, 'test_reduced.edf')
 
-    raw = mne.io.read_raw_edf(raw_fname)
+    raw = _read_raw_edf(raw_fname)
 
     raw.rename_channels({raw.info['ch_names'][0]: 'EOG'})
     raw.info['chs'][0]['coil_type'] = FIFF.FIFFV_COIL_EEG_BIPOLAR
     raw.rename_channels({raw.info['ch_names'][1]: 'EMG'})
     raw.set_channel_types({'EMG': 'emg'})
+    bids_path = _bids_path.copy().update(root=bids_root, datatype='eeg')
 
     # test dataset description overwrites with the authors set
     make_dataset_description(bids_root, name="test",
                              authors=["test1", "test2"])
-    write_raw_bids(raw, bids_basename, bids_root, overwrite=False)
+    write_raw_bids(raw, bids_path, overwrite=False)
     dataset_description_fpath = op.join(bids_root, "dataset_description.json")
     with open(dataset_description_fpath, 'r') as f:
         dataset_description_json = json.load(f)
         assert dataset_description_json["Authors"] == ["test1", "test2"]
 
     # write from fresh start w/ overwrite
-    write_raw_bids(raw, bids_basename, bids_root, overwrite=True)
+    write_raw_bids(raw, bids_path, overwrite=True)
     # after overwrite, the dataset description if defaulted to MNE-BIDS
     with open(dataset_description_fpath, 'r') as f:
         dataset_description_json = json.load(f)
-        assert dataset_description_json["Authors"] == ["MNE-BIDS"]
+        assert dataset_description_json["Authors"] == \
+            ["Please cite MNE-BIDS in your publication before removing this "
+             "(citations in README)"]
 
     # Reading the file back should raise an error, because we renamed channels
     # in `raw` and used that information to write a channels.tsv. Yet, we
     # saved the unchanged `raw` in the BIDS folder, so channels in the TSV and
     # in raw clash
     with pytest.raises(RuntimeError, match='Channels do not correspond'):
-        read_raw_bids(bids_basename + '_eeg.edf', bids_root)
+        read_raw_bids(bids_path=bids_path)
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
-        read_raw_bids(bids_basename + '_eeg.edf', bids_root,
-                      extra_params=dict(foo='bar'))
+        read_raw_bids(bids_path=bids_path, extra_params=dict(foo='bar'))
 
-    bids_fname = bids_basename.replace('run-01', 'run-%s' % run2)
+    bids_fname = bids_path.copy().update(run=run2)
     # add data in as a montage
     ch_names = raw.ch_names
-    elec_locs = np.random.random((len(ch_names), 3)).tolist()
-    ch_pos = dict(zip(ch_names, elec_locs))
+    elec_locs = np.random.random((len(ch_names), 3))
+
+    # test what happens if there is some nan entries
+    elec_locs[-1, :] = [np.nan, np.nan, np.nan]
+    ch_pos = dict(zip(ch_names, elec_locs.tolist()))
     eeg_montage = mne.channels.make_dig_montage(ch_pos=ch_pos,
                                                 coord_frame='head')
     raw.set_montage(eeg_montage)
-    write_raw_bids(raw, bids_fname, bids_root, overwrite=True)
+    # electrodes are not written w/o landmarks
+    with pytest.warns(RuntimeWarning, match='Skipping EEG electrodes.tsv... '
+                                            'Setting montage not possible'):
+        write_raw_bids(raw, bids_fname, overwrite=True)
+        electrodes_fpath = _find_matching_sidecar(bids_fname,
+                                                  suffix='electrodes',
+                                                  extension='.tsv',
+                                                  allow_fail=True)
+        assert electrodes_fpath is None
+
+    # with landmarks, eeg montage is written
+    eeg_montage = mne.channels.make_dig_montage(ch_pos=ch_pos,
+                                                coord_frame='head',
+                                                nasion=[1, 0, 0],
+                                                lpa=[0, 1, 0],
+                                                rpa=[0, 0, 1])
+    raw.set_montage(eeg_montage)
+    write_raw_bids(raw, bids_fname, overwrite=True)
+    electrodes_fpath = _find_matching_sidecar(bids_fname,
+                                              suffix='electrodes',
+                                              extension='.tsv')
+    assert op.exists(electrodes_fpath)
     _bids_validate(bids_root)
 
     # ensure there is an EMG channel in the channels.tsv:
-    channels_tsv = make_bids_basename(
+    channels_tsv = BIDSPath(
         subject=subject_id, session=session_id, task=task, run=run,
-        suffix='channels.tsv', acquisition=acq,
-        prefix=op.join(bids_root, 'sub-01', 'ses-01', 'eeg'))
+        suffix='channels', extension='.tsv', acquisition=acq,
+        root=bids_root, datatype='eeg')
     data = _from_tsv(channels_tsv)
     assert 'ElectroMyoGram' in data['description']
 
     # check that the scans list contains two scans
-    scans_tsv = make_bids_basename(
-        subject=subject_id, session=session_id, suffix='scans.tsv',
-        prefix=op.join(bids_root, 'sub-01', 'ses-01'))
+    scans_tsv = BIDSPath(
+        subject=subject_id, session=session_id,
+        suffix='scans', extension='.tsv',
+        root=bids_root)
     data = _from_tsv(scans_tsv)
     assert len(list(data.values())[0]) == 2
 
     # check that scans list is properly converted to brainvision
     if check_version('mne', '0.20') and check_version('pybv', '0.2.0'):
-        write_raw_bids(raw, bids_basename, bids_root,
+        write_raw_bids(raw, bids_path,
                        anonymize=dict(daysback=33000),
                        overwrite=True)
         data = _from_tsv(scans_tsv)
-        bids_fname = bids_basename + "_eeg.vhdr"
-        assert any([bids_fname in fname for fname in data['filename']])
+        bids_fname = bids_path.copy().update(suffix='eeg',
+                                             extension='.vhdr')
+        assert any([bids_fname.basename in fname
+                    for fname in data['filename']])
 
     # Also cover iEEG
     # We use the same data and pretend that eeg channels are ecog
     ieeg_raw = raw.copy()
+
+    # remove the old "EEG" montage, to test iEEG functionality
+    ieeg_raw.set_montage(None)
+
+    # convert channel types to ECoG and write BIDS
     eeg_picks = mne.pick_types(ieeg_raw.info, eeg=True)
     ieeg_raw.set_channel_types({raw.ch_names[i]: 'ecog'
                                 for i in eeg_picks})
     bids_root = _TempDir()
-    write_raw_bids(ieeg_raw, bids_basename, bids_root)
+    bids_path.update(root=bids_root)
+    write_raw_bids(ieeg_raw, bids_path)
     _bids_validate(bids_root)
+
+    # assert README has references in it
+    readme = op.join(bids_root, 'README')
+    with open(readme, 'r') as fid:
+        text = fid.read()
+        assert REFERENCES['ieeg'] in text
+        assert REFERENCES['meg'] not in text
+        assert REFERENCES['eeg'] not in text
 
     # test writing electrode coordinates (.tsv)
     # and coordinate system (.json)
-    ch_names = raw.ch_names
+    ch_names = ieeg_raw.ch_names
     elec_locs = np.random.random((len(ch_names), 3)).tolist()
     ch_pos = dict(zip(ch_names, elec_locs))
     ecog_montage = mne.channels.make_dig_montage(ch_pos=ch_pos,
                                                  coord_frame='mri')
-    raw.set_montage(ecog_montage)
+    ieeg_raw.set_montage(ecog_montage)
     bids_root = _TempDir()
-    write_raw_bids(raw, bids_basename, bids_root)
+    bids_path.update(root=bids_root)
+    write_raw_bids(ieeg_raw, bids_path)
     _bids_validate(bids_root)
+
+    # XXX: Should be improved with additional coordinate system descriptions
+    # iEEG montages written from mne-python end up as "Other"
+    bids_fname.update(root=bids_root)
+    electrodes_fname = _find_matching_sidecar(bids_fname,
+                                              suffix='electrodes',
+                                              extension='.tsv')
+    coordsystem_fname = _find_matching_sidecar(bids_fname,
+                                               suffix='coordsystem',
+                                               extension='.json')
+    assert 'space-mri' in electrodes_fname
+    assert 'space-mri' in coordsystem_fname
+    with open(coordsystem_fname, 'r') as fin:
+        coordsystem_json = json.load(fin)
+    assert coordsystem_json['iEEGCoordinateSystem'] == 'Other'
 
     # test anonymize and convert
     if check_version('mne', '0.20') and check_version('pybv', '0.2.0'):
-        raw = mne.io.read_raw_edf(raw_fname)
-        output_path = _test_anonymize(raw, bids_basename)
+        raw = _read_raw_edf(raw_fname)
+        output_path = _test_anonymize(raw, bids_path)
         _bids_validate(output_path)
 
 
@@ -774,10 +1028,20 @@ def test_bdf(_bids_validate):
     data_path = op.join(base_path, 'edf', 'tests', 'data')
     raw_fname = op.join(data_path, 'test.bdf')
 
-    raw = mne.io.read_raw_bdf(raw_fname)
-    with pytest.warns(RuntimeWarning, match='No line frequency found'):
-        write_raw_bids(raw, bids_basename, bids_root, overwrite=False)
+    bids_path = _bids_path.copy().update(root=bids_root)
+
+    raw = _read_raw_bdf(raw_fname)
+    raw.info['line_freq'] = 60
+    write_raw_bids(raw, bids_path, overwrite=False)
     _bids_validate(bids_root)
+
+    # assert README has references in it
+    readme = op.join(bids_root, 'README')
+    with open(readme, 'r') as fid:
+        text = fid.read()
+        assert REFERENCES['eeg'] in text
+        assert REFERENCES['meg'] not in text
+        assert REFERENCES['ieeg'] not in text
 
     # Test also the reading of channel types from channels.tsv
     # the first channel in the raw data is not MISC right now
@@ -785,9 +1049,11 @@ def test_bdf(_bids_validate):
     assert coil_type(raw.info, test_ch_idx) != 'misc'
 
     # we will change the channel type to MISC and overwrite the channels file
-    bids_fname = bids_basename + '_eeg.bdf'
-    channels_fname = _find_matching_sidecar(bids_fname, bids_root,
-                                            'channels.tsv')
+    bids_fname = bids_path.copy().update(suffix='eeg',
+                                         extension='.bdf')
+    channels_fname = _find_matching_sidecar(bids_fname,
+                                            suffix='channels',
+                                            extension='.tsv')
     channels_dict = _from_tsv(channels_fname)
     channels_dict['type'][test_ch_idx] = 'MISC'
     _to_tsv(channels_dict, channels_fname)
@@ -795,57 +1061,51 @@ def test_bdf(_bids_validate):
     # Now read the raw data back from BIDS, with the tampered TSV, to show
     # that the channels.tsv truly influences how read_raw_bids sets ch_types
     # in the raw data object
-    raw = read_raw_bids(bids_fname, bids_root)
+    bids_path.update(datatype='eeg')
+    raw = read_raw_bids(bids_path=bids_path)
     assert coil_type(raw.info, test_ch_idx) == 'misc'
-
     with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
-        read_raw_bids(bids_fname, bids_root, extra_params=dict(foo='bar'))
+        read_raw_bids(bids_path=bids_path, extra_params=dict(foo='bar'))
 
     # Test cropped assertion error
-    raw = mne.io.read_raw_bdf(raw_fname)
+    raw = _read_raw_bdf(raw_fname)
     raw.crop(0, raw.times[-2])
     with pytest.raises(AssertionError, match='cropped'):
-        write_raw_bids(raw, bids_basename, bids_root)
+        write_raw_bids(raw, bids_path)
 
     # test anonymize and convert
     if check_version('mne', '0.20') and check_version('pybv', '0.2.0'):
-        raw = mne.io.read_raw_bdf(raw_fname)
-        output_path = _test_anonymize(raw, bids_basename)
+        raw = _read_raw_bdf(raw_fname)
+        output_path = _test_anonymize(raw, bids_path)
         _bids_validate(output_path)
 
 
 @pytest.mark.filterwarnings(warning_str['meas_date_set_to_none'])
 def test_set(_bids_validate):
     """Test write_raw_bids conversion for EEGLAB data."""
-    # standalone .set file
-    bids_root = _TempDir()
-    data_path = op.join(testing.data_path(), 'EEGLAB')
-
-    # .set with associated .fdt
+    # standalone .set file with associated .fdt
     bids_root = _TempDir()
     data_path = op.join(testing.data_path(), 'EEGLAB')
     raw_fname = op.join(data_path, 'test_raw.set')
-
-    raw = mne.io.read_raw_eeglab(raw_fname)
+    raw = _read_raw_eeglab(raw_fname)
+    bids_path = _bids_path.copy().update(root=bids_root, datatype='eeg')
 
     # embedded - test mne-version assertion
     tmp_version = mne.__version__
     mne.__version__ = '0.16'
     with pytest.raises(ValueError, match='Your version of MNE is too old.'):
-        write_raw_bids(raw, bids_basename, bids_root)
+        write_raw_bids(raw, bids_path)
     mne.__version__ = tmp_version
 
     # proceed with the actual test for EEGLAB data
-    write_raw_bids(raw, bids_basename, bids_root, overwrite=False)
-    read_raw_bids(bids_basename + '_eeg.set', bids_root)
+    write_raw_bids(raw, bids_path, overwrite=False)
+    read_raw_bids(bids_path=bids_path)
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
-        read_raw_bids(bids_basename + '_eeg.set', bids_root,
-                      extra_params=dict(foo='bar'))
+        read_raw_bids(bids_path=bids_path, extra_params=dict(foo='bar'))
 
     with pytest.raises(FileExistsError, match="already exists"):  # noqa: F821
-        write_raw_bids(raw, bids_basename, bids_root=bids_root,
-                       overwrite=False)
+        write_raw_bids(raw, bids_path, overwrite=False)
     _bids_validate(bids_root)
 
     # check events.tsv is written
@@ -853,7 +1113,7 @@ def test_set(_bids_validate):
     # is broken for earlier versions
     events_tsv_fname = op.join(bids_root, 'sub-' + subject_id,
                                'ses-' + session_id, 'eeg',
-                               bids_basename + '_events.tsv')
+                               bids_path.basename + '_events.tsv')
     if check_version('mne', '0.18'):
         assert op.exists(events_tsv_fname)
 
@@ -862,12 +1122,13 @@ def test_set(_bids_validate):
     raw.set_channel_types({raw.ch_names[i]: 'ecog'
                            for i in mne.pick_types(raw.info, eeg=True)})
     bids_root = _TempDir()
-    write_raw_bids(raw, bids_basename, bids_root)
+    bids_path.update(root=bids_root)
+    write_raw_bids(raw, bids_path)
     _bids_validate(bids_root)
 
     # test anonymize and convert
     if check_version('mne', '0.20') and check_version('pybv', '0.2.0'):
-        output_path = _test_anonymize(raw, bids_basename)
+        output_path = _test_anonymize(raw, bids_path)
         _bids_validate(output_path)
 
 
@@ -886,8 +1147,9 @@ def test_write_anat(_bids_validate):
     events_fname = op.join(data_path, 'MEG', 'sample',
                            'sample_audvis_trunc_raw-eve.fif')
 
-    raw = mne.io.read_raw_fif(raw_fname)
-    write_raw_bids(raw, bids_basename, bids_root, events_data=events_fname,
+    raw = _read_raw_fif(raw_fname)
+    bids_path = _bids_path.copy().update(root=bids_root)
+    write_raw_bids(raw, bids_path, events_data=events_fname,
                    event_id=event_id, overwrite=False)
 
     # Write some MRI data and supply a `trans`
@@ -909,7 +1171,7 @@ def test_write_anat(_bids_validate):
     assert op.exists(op.join(anat_dir, 'sub-01_ses-01_acq-01_T1w.nii.gz'))
     with open(t1w_json_path, 'r') as f:
         t1w_json = json.load(f)
-    print(t1w_json)
+
     # We only should have AnatomicalLandmarkCoordinates as key
     np.testing.assert_array_equal(list(t1w_json.keys()),
                                   ['AnatomicalLandmarkCoordinates'])
@@ -918,15 +1180,19 @@ def test_write_anat(_bids_validate):
     point_list = ['LPA', 'NAS', 'RPA']
     np.testing.assert_array_equal(list(anat_dict.keys()),
                                   point_list)
+    sidecar_basename = BIDSPath(subject='01', session='01',
+                                acquisition='01', root=bids_root,
+                                suffix='T1w', extension='.nii.gz')
     # test the actual values of the voxels (no floating points)
     for i, point in enumerate([(66, 51, 46), (41, 32, 74), (17, 53, 47)]):
         coords = anat_dict[point_list[i]]
         np.testing.assert_array_equal(np.asarray(coords, dtype=int),
                                       point)
 
-    # BONUS: test also that we can find the matching sidecar
-        side_fname = _find_matching_sidecar('sub-01_ses-01_acq-01_T1w.nii.gz',
-                                            bids_root, 'T1w.json')
+        # BONUS: test also that we can find the matching sidecar
+        side_fname = _find_matching_sidecar(sidecar_basename,
+                                            suffix='T1w',
+                                            extension='.json')
         assert op.split(side_fname)[-1] == 'sub-01_ses-01_acq-01_T1w.json'
 
     # Now try some anat writing that will fail
@@ -946,13 +1212,19 @@ def test_write_anat(_bids_validate):
     write_anat(bids_root, subject_id, t1w_mgh, session_id)
     # Assert that we truly cannot find a sidecar
     with pytest.raises(RuntimeError, match='Did not find any'):
-        _find_matching_sidecar('sub-01_ses-01_acq-01_T1w.nii.gz',
-                               bids_root, 'T1w.json')
+        _find_matching_sidecar(sidecar_basename,
+                               suffix='T1w', extension='.json')
 
     # trans has a wrong type
     wrong_type = 1
-    match = 'transform type {} not known, must be'.format(type(wrong_type))
-    with pytest.raises(ValueError, match=match):
+    if check_version('mne', min_version='0.21'):
+        match = f'trans must be an instance of .*, got {type(wrong_type)} '
+        ex = TypeError
+    else:
+        match = f'transform type {type(wrong_type)} not known, must be'
+        ex = ValueError
+
+    with pytest.raises(ex, match=match):
         write_anat(bids_root, subject_id, t1w_mgh, session_id, raw=raw,
                    trans=wrong_type, verbose=True, deface=False,
                    overwrite=True)
@@ -1125,18 +1397,39 @@ def test_write_raw_pathlike():
                         'sample_audvis_trunc_raw.fif')
     event_id = {'Auditory/Left': 1, 'Auditory/Right': 2, 'Visual/Left': 3,
                 'Visual/Right': 4, 'Smiley': 5, 'Button': 32}
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
 
     bids_root = Path(_TempDir())
-    events_fname = (Path(data_path) / 'MEG' / 'sample' /
-                    'sample_audvis_trunc_raw-eve.fif')
-    bids_root_ = write_raw_bids(raw=raw, bids_basename=bids_basename,
-                                bids_root=bids_root, events_data=events_fname,
+    events_fname = \
+        Path(data_path) / 'MEG' / 'sample' / 'sample_audvis_trunc_raw-eve.fif'
+    bids_path = _bids_path.copy().update(root=bids_root)
+    bids_path_ = write_raw_bids(raw=raw, bids_path=bids_path,
+                                events_data=events_fname,
                                 event_id=event_id, overwrite=False)
 
     # write_raw_bids() should return a string.
-    assert isinstance(bids_root_, str)
-    assert bids_root_ == str(bids_root)
+    assert isinstance(bids_path_, BIDSPath)
+    assert bids_path_.root == bids_root
+
+
+def test_write_raw_no_dig():
+    data_path = testing.data_path()
+    raw_fname = op.join(data_path, 'MEG', 'sample',
+                        'sample_audvis_trunc_raw.fif')
+    raw = _read_raw_fif(raw_fname)
+    bids_root = Path(_TempDir())
+    bids_path = _bids_path.copy().update(root=bids_root)
+    bids_path_ = write_raw_bids(raw=raw, bids_path=bids_path,
+                                overwrite=True)
+    assert bids_path_.root == bids_root
+    raw.info['dig'] = None
+    raw.save(str(bids_root / 'tmp_raw.fif'))
+    raw = _read_raw_fif(bids_root / 'tmp_raw.fif')
+    bids_path_ = write_raw_bids(raw=raw, bids_path=bids_path,
+                                overwrite=True)
+    assert bids_path_.root == bids_root
+    assert bids_path_.suffix == 'meg'
+    assert bids_path_.extension == '.fif'
 
 
 @requires_nibabel()
@@ -1146,7 +1439,7 @@ def test_write_anat_pathlike():
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
     trans_fname = raw_fname.replace('_raw.fif', '-trans.fif')
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     trans = mne.read_trans(trans_fname)
 
     bids_root = Path(_TempDir())
@@ -1169,12 +1462,152 @@ def test_write_does_not_alter_events_inplace():
     events_fname = op.join(data_path, 'MEG', 'sample',
                            'sample_audvis_trunc_raw-eve.fif')
 
-    raw = mne.io.read_raw_fif(raw_fname)
+    raw = _read_raw_fif(raw_fname)
     events = mne.read_events(events_fname)
     events_orig = events.copy()
 
     bids_root = _TempDir()
-    write_raw_bids(raw=raw, bids_basename=bids_basename, bids_root=bids_root,
+    bids_path = _bids_path.copy().update(root=bids_root)
+    write_raw_bids(raw=raw, bids_path=bids_path,
                    events_data=events, overwrite=True)
 
     assert np.array_equal(events, events_orig)
+
+
+def _ensure_list(x):
+    """Return a list representation of the input."""
+    if isinstance(x, str):
+        return [x]
+    elif x is None:
+        return []
+    else:
+        return list(x)
+
+
+@pytest.mark.parametrize(
+    'ch_names, descriptions, drop_status_col, drop_description_col, '
+    'existing_ch_names, existing_descriptions, datatype, overwrite',
+    [
+        # Only mark channels, do not set descriptions.
+        (['MEG 0112', 'MEG 0131', 'EEG 053'], None, False, False, [], [], None,
+         False),
+        ('MEG 0112', None, False, False, [], [], None, False),
+        ('nonsense', None, False, False, [], [], None, False),
+        # Now also set descriptions.
+        (['MEG 0112', 'MEG 0131'], ['Really bad!', 'Even worse.'], False,
+         False, [], [], None, False),
+        ('MEG 0112', 'Really bad!', False, False, [], [], None, False),
+        (['MEG 0112', 'MEG 0131'], ['Really bad!'], False, False, [], [], None,
+         False),  # Should raise.
+        # `datatype='meg`
+        (['MEG 0112'], ['Really bad!'], False, False, [], [], 'meg', False),
+        # Enure we create missing columns.
+        ('MEG 0112', 'Really bad!', True, True, [], [], None, False),
+        # Ensure existing entries are left untouched if `overwrite=False`
+        (['EEG 053'], ['Just testing'], False, False, ['MEG 0112', 'MEG 0131'],
+         ['Really bad!', 'Even worse.'], None, False),
+        # Ensure existing entries are discarded if `overwrite=True`.
+        (['EEG 053'], ['Just testing'], False, False, ['MEG 0112', 'MEG 0131'],
+         ['Really bad!', 'Even worse.'], None, True)
+    ])
+@pytest.mark.filterwarnings(warning_str['channel_unit_changed'])
+def test_mark_bad_channels(_bids_validate,
+                           ch_names, descriptions,
+                           drop_status_col, drop_description_col,
+                           existing_ch_names, existing_descriptions,
+                           datatype, overwrite):
+    """Test marking channels of an existing BIDS dataset as "bad"."""
+
+    # Setup: Create a fresh BIDS dataset.
+    bids_root = _TempDir()
+    bids_path = _bids_path.copy().update(root=bids_root, datatype='meg',
+                                         suffix='meg')
+    data_path = testing.data_path()
+    raw_fname = op.join(data_path, 'MEG', 'sample',
+                        'sample_audvis_trunc_raw.fif')
+    event_id = {'Auditory/Left': 1, 'Auditory/Right': 2, 'Visual/Left': 3,
+                'Visual/Right': 4, 'Smiley': 5, 'Button': 32}
+    events_fname = op.join(data_path, 'MEG', 'sample',
+                           'sample_audvis_trunc_raw-eve.fif')
+    raw = _read_raw_fif(raw_fname, verbose=False)
+    raw.info['bads'] = []
+    write_raw_bids(raw, bids_path=bids_path, events_data=events_fname,
+                   event_id=event_id, verbose=False)
+
+    channels_fname = _find_matching_sidecar(bids_path, suffix='channels',
+                                            extension='.tsv')
+
+    if drop_status_col:
+        # Remove `status` column from the sidecare TSV file.
+        tsv_data = _from_tsv(channels_fname)
+        del tsv_data['status']
+        _to_tsv(tsv_data, channels_fname)
+
+    if drop_description_col:
+        # Remove `status_description` column from the sidecare TSV file.
+        tsv_data = _from_tsv(channels_fname)
+        del tsv_data['status_description']
+        _to_tsv(tsv_data, channels_fname)
+
+    # Test that we raise if number of channels doesn't match number of
+    # descriptions.
+    if (descriptions is not None and
+            len(_ensure_list(ch_names)) != len(_ensure_list(descriptions))):
+        with pytest.raises(ValueError, match='must match'):
+            mark_bad_channels(ch_names=ch_names, descriptions=descriptions,
+                              bids_path=bids_path, overwrite=overwrite)
+        return
+
+    # Test that we raise if we encounter an unknown channel name.
+    if any([ch_name not in raw.ch_names
+            for ch_name in _ensure_list(ch_names)]):
+        with pytest.raises(ValueError, match='not found in dataset'):
+            mark_bad_channels(ch_names=ch_names, descriptions=descriptions,
+                              bids_path=bids_path, overwrite=overwrite)
+        return
+
+    if not overwrite:
+        # Mark `existing_ch_names` as bad in raw and sidecar TSV before we
+        # begin our actual tests, which should then add additional channels
+        # to the list of bads, retaining the ones we're specifying here.
+        mark_bad_channels(ch_names=existing_ch_names,
+                          descriptions=existing_descriptions,
+                          bids_path=bids_path, overwrite=True)
+        _bids_validate(bids_root)
+        raw = read_raw_bids(bids_path=bids_path, verbose=False)
+        # Order is not preserved
+        assert set(existing_ch_names) == set(raw.info['bads'])
+        del raw
+
+    mark_bad_channels(ch_names=ch_names, descriptions=descriptions,
+                      bids_path=bids_path, overwrite=overwrite)
+    _bids_validate(bids_root)
+    raw = read_raw_bids(bids_path=bids_path, verbose=False)
+
+    if drop_status_col or overwrite:
+        # Existing column values should have been discarded, so only the new
+        # ones should be present.
+        expected_bads = _ensure_list(ch_names)
+    else:
+        expected_bads = (_ensure_list(ch_names) +
+                         _ensure_list(existing_ch_names))
+
+    if drop_description_col or overwrite:
+        # Existing column values should have been discarded, so only the new
+        # ones should be present.
+        expected_descriptions = _ensure_list(descriptions)
+    else:
+        expected_descriptions = (_ensure_list(descriptions) +
+                                 _ensure_list(existing_descriptions))
+
+    # Order is not preserved
+    assert len(expected_bads) == len(raw.info['bads'])
+    assert set(expected_bads) == set(raw.info['bads'])
+
+    # Descriptions are not mapped to Raw, so let's check the TSV contents
+    # directly.
+    tsv_data = _from_tsv(channels_fname)
+    assert 'status' in tsv_data
+    assert 'status_description' in tsv_data
+    for description in expected_descriptions:
+        assert description in tsv_data['status_description']

@@ -7,101 +7,36 @@
 #          Matt Sanderson <matt.sanderson@mq.edu.au>
 #
 # License: BSD (3-clause)
-import os
-import os.path as op
-import glob
 import json
-import shutil as sh
+import os
 import re
-from datetime import datetime
-from collections import defaultdict
-from pathlib import Path
+from datetime import datetime, date, timedelta, timezone
+from os import path as op
 
 import numpy as np
 from mne import read_events, find_events, events_from_annotations
-from mne.utils import check_version, warn
 from mne.channels import make_standard_montage
-from mne.io.pick import pick_types
-from mne.io.kit.kit import get_kit_info
 from mne.io.constants import FIFF
-from mne.time_frequency import psd_array_welch
+from mne.io.kit.kit import get_kit_info
+from mne.io.pick import pick_types
+from mne.utils import check_version, warn, logger
 
 from mne_bids.tsv_handler import _to_tsv, _tsv_to_str
 
 
-def get_kinds(bids_root):
-    """Get list of data types ("kinds") present in a BIDS dataset.
-
-    Parameters
-    ----------
-    bids_root : str | pathlib.Path
-        Path to the root of the BIDS directory.
-
-    Returns
-    -------
-    kinds : list of str
-        List of the data types present in the BIDS dataset pointed to by
-        `bids_root`.
-
-    """
-    # Take all possible kinds from "entity" table (Appendix in BIDS spec)
-    kind_list = ('anat', 'func', 'dwi', 'fmap', 'beh', 'meg', 'eeg', 'ieeg')
-    kinds = list()
-    for root, dirs, files in os.walk(bids_root):
-        for dir in dirs:
-            if dir in kind_list and dir not in kinds:
-                kinds.append(dir)
-
-    return kinds
+# This regex matches key-val pairs. Any characters are allowed in the key and
+# the value, except these special symbols: - _ . \ /
+param_regex = re.compile(r'([^-_\.\\\/]+)-([^-_\.\\\/]+)')
 
 
-def get_entity_vals(bids_root, entity_key):
-    """Get list of values associated with an `entity_key` in a BIDS dataset.
-
-    BIDS file names are organized by key-value pairs called "entities" [1]_.
-    With this function, you can get all values for an entity indexed by its
-    key.
-
-    Parameters
-    ----------
-    bids_root : str | pathlib.Path
-        Path to the root of the BIDS directory.
-    entity_key : str
-        The name of the entity key to search for. Can be one of
-        ['sub', 'ses', 'run', 'acq'].
-
-    Returns
-    -------
-    entity_vals : list of str
-        List of the values associated with an `entity_key` in the BIDS dataset
-        pointed to by `bids_root`.
-
-    Examples
-    --------
-    >>> bids_root = '~/bids_datasets/eeg_matchingpennies'
-    >>> entity_key = 'sub'
-    >>> get_entity_vals(bids_root, entity_key)
-    ['05', '06', '07', '08', '09', '10', '11']
-
-
-    References
-    ----------
-    .. [1] https://bids-specification.rtfd.io/en/latest/02-common-principles.html#file-name-structure  # noqa: E501
-
-    """
-    entities = ('sub', 'ses', 'task', 'run', 'acq')
-    if entity_key not in entities:
-        raise ValueError('`key` must be one of "{}". Got "{}"'
-                         .format(entities, entity_key))
-
-    p = re.compile(r'{}-(.*?)_'.format(entity_key))
-    value_list = list()
-    for filename in Path(bids_root).rglob('*{}-*_*'.format(entity_key)):
-        match = p.search(filename.stem)
-        value = match.group(1)
-        if value not in value_list:
-            value_list.append(value)
-    return sorted(value_list)
+def _ensure_tuple(x):
+    """Return a tuple."""
+    if x is None:
+        return tuple()
+    elif isinstance(x, str):
+        return (x,)
+    else:
+        return tuple(x)
 
 
 def _get_ch_type_mapping(fro='mne', to='bids'):
@@ -116,7 +51,7 @@ def _get_ch_type_mapping(fro='mne', to='bids'):
 
     Returns
     -------
-    ch_type_mapping : collections.defaultdict
+    mapping : dict
         Dictionary mapping from one nomenclature of channel types to another.
         If a key is not present, a default value will be returned that depends
         on the `fro` and `to` parameters.
@@ -129,217 +64,48 @@ def _get_ch_type_mapping(fro='mne', to='bids'):
 
     """
     if fro == 'mne' and to == 'bids':
-        map_chs = dict(eeg='EEG', misc='MISC', stim='TRIG', emg='EMG',
+        mapping = dict(eeg='EEG', misc='MISC', stim='TRIG', emg='EMG',
                        ecog='ECOG', seeg='SEEG', eog='EOG', ecg='ECG',
+                       resp='RESP',
                        # MEG channels
                        meggradaxial='MEGGRADAXIAL', megmag='MEGMAG',
                        megrefgradaxial='MEGREFGRADAXIAL',
-                       meggradplanar='MEGGRADPLANAR', megrefmag='MEGREFMAG',
-                       )
-        default_value = 'OTHER'
+                       meggradplanar='MEGGRADPLANAR', megrefmag='MEGREFMAG')
 
     elif fro == 'bids' and to == 'mne':
-        map_chs = dict(EEG='eeg', MISC='misc', TRIG='stim', EMG='emg',
+        mapping = dict(EEG='eeg', MISC='misc', TRIG='stim', EMG='emg',
                        ECOG='ecog', SEEG='seeg', EOG='eog', ECG='ecg',
+                       RESP='resp',
                        # No MEG channels for now
                        # Many to one mapping
-                       VEOG='eog', HEOG='eog',
-                       )
-        default_value = 'misc'
-
+                       VEOG='eog', HEOG='eog')
     else:
         raise ValueError('Only two types of mappings are currently supported: '
                          'from mne to bids, or from bids to mne. However, '
                          'you specified from "{}" to "{}"'.format(fro, to))
 
-    # Make it a defaultdict to prevent key errors
-    ch_type_mapping = defaultdict(lambda: default_value)
-    ch_type_mapping.update(map_chs)
-
-    return ch_type_mapping
+    return mapping
 
 
-def print_dir_tree(folder, max_depth=None):
-    """Recursively print dir tree starting from `folder` up to `max_depth`."""
-    if not op.exists(folder):
-        raise ValueError('Directory does not exist: {}'.format(folder))
-    msg = '`max_depth` must be a positive integer or None'
-    if not isinstance(max_depth, (int, type(None))):
-        raise ValueError(msg)
-    if max_depth is None:
-        max_depth = float('inf')
-    if max_depth < 0:
-        raise ValueError(msg)
-
-    # Use max_depth same as the -L param in the unix `tree` command
-    max_depth += 1
-
-    # Base length of a tree branch, to normalize each tree's start to 0
-    baselen = len(folder.split(os.sep)) - 1
-
-    # Recursively walk through all directories
-    for root, dirs, files in os.walk(folder):
-
-        # Check how far we have walked
-        branchlen = len(root.split(os.sep)) - baselen
-
-        # Only print, if this is up to the depth we asked
-        if branchlen <= max_depth:
-            if branchlen <= 1:
-                print('|{}'.format(op.basename(root) + os.sep))
-            else:
-                print('|{} {}'.format((branchlen - 1) * '---',
-                                      op.basename(root) + os.sep))
-
-            # Only print files if we are NOT yet up to max_depth or beyond
-            if branchlen < max_depth:
-                for file in files:
-                    print('|{} {}'.format(branchlen * '---', file))
-
-
-def make_bids_folders(subject, session=None, kind=None, bids_root=None,
-                      make_dir=True, overwrite=False, verbose=False):
-    """Create a BIDS folder hierarchy.
-
-    This creates a hierarchy of folders *within* a BIDS dataset. You should
-    plan to create these folders *inside* the bids_root folder of the dataset.
-
-    Parameters
-    ----------
-    subject : str
-        The subject ID. Corresponds to "sub".
-    kind : str
-        The kind of folder being created at the end of the hierarchy. E.g.,
-        "anat", "func", etc.
-    session : str | None
-        The session for a item. Corresponds to "ses".
-    bids_root : str | pathlib.Path | None
-        The bids_root for the folders to be created. If None, folders will be
-        created in the current working directory.
-    make_dir : bool
-        Whether to actually create the folders specified. If False, only a
-        path will be generated but no folders will be created.
-    overwrite : bool
-        How to handle overwriting previously generated data.
-        If overwrite == False then no existing folders will be removed, however
-        if overwrite == True then any existing folders at the session level
-        or lower will be removed, including any contained data.
-    verbose : bool
-        If verbose is True, print status updates
-        as folders are created.
-
-    Returns
-    -------
-    path : str
-        The (relative) path to the folder that was created.
-
-    Examples
-    --------
-    >>> print(make_bids_folders('sub_01', session='my_session',
-                                kind='meg', bids_root='path/to/project',
-                                make_dir=False))  # noqa
-    path/to/project/sub-sub_01/ses-my_session/meg
-
-    """
-    _check_types((subject, kind, session))
-    if bids_root is not None:
-        bids_root = _path_to_str(bids_root)
-
-    if session is not None:
-        _check_key_val('ses', session)
-
-    path = ['sub-%s' % subject]
-    if isinstance(session, str):
-        path.append('ses-%s' % session)
-    if isinstance(kind, str):
-        path.append(kind)
-    path = op.join(*path)
-    if isinstance(bids_root, str):
-        path = op.join(bids_root, path)
-
-    if make_dir is True:
-        _mkdir_p(path, overwrite=overwrite, verbose=verbose)
-    return path
-
-
-def _mkdir_p(path, overwrite=False, verbose=False):
-    """Create a directory, making parent directories as needed [1].
-
-    References
-    ----------
-    .. [1] stackoverflow.com/questions/600268/mkdir-p-functionality-in-python
-
-    """
-    if overwrite and op.isdir(path):
-        sh.rmtree(path)
-        if verbose is True:
-            print('Clearing path: %s' % path)
-
-    os.makedirs(path, exist_ok=True)
-    if verbose is True:
-        print('Creating folder: %s' % path)
-
-
-def _parse_ext(raw_fname, verbose=False):
-    """Split a filename into its name and extension."""
-    fname, ext = os.path.splitext(raw_fname)
-    # BTi data is the only file format that does not have a file extension
-    if ext == '' or 'c,rf' in fname:
-        if verbose is True:
-            print('Found no extension for raw file, assuming "BTi" format and '
-                  'appending extension .pdf')
-        ext = '.pdf'
-    # If ending on .gz, check whether it is an .nii.gz file
-    elif ext == '.gz' and raw_fname.endswith('.nii.gz'):
-        ext = '.nii.gz'
-        fname = fname[:-4]  # cut off the .nii
-    return fname, ext
-
-
-# This regex matches key-val pairs. Any characters are allowed in the key and
-# the value, except these special symbols: - _ . \ /
-param_regex = re.compile(r'([^-_\.\\\/]+)-([^-_\.\\\/]+)')
-
-
-def _parse_bids_filename(fname, verbose):
-    """Get dict from BIDS fname."""
-    keys = ['sub', 'ses', 'task', 'acq', 'run', 'proc', 'run', 'space',
-            'recording', 'part', 'kind']
-    params = {key: None for key in keys}
-    idx_key = 0
-    for match in re.finditer(param_regex, op.basename(fname)):
-        key, value = match.groups()
-        if key not in keys:
-            raise KeyError('Unexpected entity "%s" found in filename "%s"'
-                           % (key, fname))
-        if keys.index(key) < idx_key:
-            raise ValueError('Entities in filename not ordered correctly.'
-                             ' "%s" should have occured earlier in the '
-                             'filename "%s"' % (key, fname))
-        idx_key = keys.index(key)
-        params[key] = value
-    return params
-
-
-def _handle_kind(raw):
-    """Get kind."""
+def _handle_datatype(raw):
+    """Get datatype."""
     if 'eeg' in raw and ('ecog' in raw or 'seeg' in raw):
         raise ValueError('Both EEG and iEEG channels found in data.'
                          'There is currently no specification on how'
                          'to handle this data. Please proceed manually.')
     elif 'meg' in raw:
-        kind = 'meg'
+        datatype = 'meg'
     elif 'ecog' in raw or 'seeg' in raw:
-        kind = 'ieeg'
+        datatype = 'ieeg'
     elif 'eeg' in raw:
-        kind = 'eeg'
+        datatype = 'eeg'
     elif 'fnirs_raw' in raw:
-        kind = 'nirs'
+        datatype = 'nirs'
     else:
         raise ValueError('Neither MEG/EEG/iEEG channels found in data.'
                          'Please use raw.set_channel_types to set the '
                          'channel types in the data.')
-    return kind
+    return datatype
 
 
 def _age_on_date(bday, exp_date):
@@ -368,24 +134,16 @@ def _check_types(variables):
     """Make sure all vars are str or None."""
     for var in variables:
         if not isinstance(var, (str, type(None))):
-            raise ValueError("You supplied a value of type %s, where a "
-                             "string or None was expected." % type(var))
-
-
-def _path_to_str(var):
-    """Make sure var is a string or Path, return string representation."""
-    if not isinstance(var, (Path, str)):
-        raise ValueError("All path parameters must be either strings or "
-                         "pathlib.Path objects. Found type %s." % type(var))
-    else:
-        return str(var)
+            raise ValueError(f"You supplied a value ({var}) of type "
+                             f"{type(var)}, where a string or None was "
+                             f"expected.")
 
 
 def _write_json(fname, dictionary, overwrite=False, verbose=False):
     """Write JSON to a file."""
     if op.exists(fname) and not overwrite:
-        raise FileExistsError('"%s" already exists. Please set '  # noqa: F821
-                              'overwrite to True.' % fname)
+        raise FileExistsError(f'"{fname}" already exists. '
+                              'Please set overwrite to True.')
 
     json_output = json.dumps(dictionary, indent=4)
     with open(fname, 'w') as fid:
@@ -393,31 +151,45 @@ def _write_json(fname, dictionary, overwrite=False, verbose=False):
         fid.write('\n')
 
     if verbose is True:
-        print(os.linesep + "Writing '%s'..." % fname + os.linesep)
+        print(os.linesep + f"Writing '{fname}'..." + os.linesep)
         print(json_output)
 
 
 def _write_tsv(fname, dictionary, overwrite=False, verbose=False):
     """Write an ordered dictionary to a .tsv file."""
     if op.exists(fname) and not overwrite:
-        raise FileExistsError('"%s" already exists. Please set '  # noqa: F821
-                              'overwrite to True.' % fname)
+        raise FileExistsError(f'"{fname}" already exists. '
+                              'Please set overwrite to True.')
     _to_tsv(dictionary, fname)
 
     if verbose:
-        print(os.linesep + "Writing '%s'..." % fname + os.linesep)
+        print(os.linesep + f"Writing '{fname}'..." + os.linesep)
         print(_tsv_to_str(dictionary))
+
+
+def _write_text(fname, text, overwrite=False, verbose=True):
+    """Write text to a file."""
+    if op.exists(fname) and not overwrite:
+        raise FileExistsError(f'"{fname}" already exists. '
+                              'Please set overwrite to True.')
+    with open(fname, 'w') as fid:
+        fid.write(text)
+        fid.write('\n')
+
+    if verbose:
+        print(os.linesep + f"Writing '{fname}'..." + os.linesep)
+        print(text)
 
 
 def _check_key_val(key, val):
     """Perform checks on a value to make sure it adheres to the spec."""
     if any(ii in val for ii in ['-', '_', '/']):
         raise ValueError("Unallowed `-`, `_`, or `/` found in key/value pair"
-                         " %s: %s" % (key, val))
+                         f" {key}: {val}")
     return key, val
 
 
-def _read_events(events_data, event_id, raw, ext):
+def _read_events(events_data, event_id, raw, ext, verbose=None):
     """Read in events data.
 
     Parameters
@@ -433,6 +205,8 @@ def _read_events(events_data, event_id, raw, ext):
         The data as MNE-Python Raw object.
     ext : str
         The extension of the original data file.
+    verbose : bool | str | int | None
+        If not None, override default verbose level (see :func:`mne.verbose`).
 
     Returns
     -------
@@ -444,19 +218,21 @@ def _read_events(events_data, event_id, raw, ext):
 
     """
     if isinstance(events_data, str):
-        events = read_events(events_data).astype(int)
+        events = read_events(events_data, verbose=verbose).astype(int)
     elif isinstance(events_data, np.ndarray):
         if events_data.ndim != 2:
             raise ValueError('Events must have two dimensions, '
-                             'found %s' % events_data.ndim)
+                             f'found {events_data.ndim}')
         if events_data.shape[1] != 3:
             raise ValueError('Events must have second dimension of length 3, '
-                             'found %s' % events_data.shape[1])
+                             f'found {events_data.shape[1]}')
         events = events_data
     elif 'stim' in raw:
-        events = find_events(raw, min_duration=0.001, initial_event=True)
+        events = find_events(raw, min_duration=0.001, initial_event=True,
+                             verbose=verbose)
     elif ext in ['.vhdr', '.set'] and check_version('mne', '0.18'):
-        events, event_id = events_from_annotations(raw, event_id)
+        events, event_id = events_from_annotations(raw, event_id,
+                                                   verbose=verbose)
     else:
         warn('No events found or provided. Please make sure to'
              ' set channel type using raw.set_channel_types'
@@ -529,122 +305,12 @@ def _extract_landmarks(dig):
     return coords
 
 
-def _find_best_candidates(params, candidate_list):
-    """Return the best candidate, based on the number of param matches.
-
-    Assign each candidate a score, based on how many entities are shared with
-    the ones supplied in the `params` parameter. The candidate with the highest
-    score wins. Candidates with entities that conflict with the supplied
-    `params` are disqualified.
-
-    Parameters
-    ----------
-    params : dict
-        The entities that the candidate should match.
-    candidate_list : list of str
-        A list of candidate filenames.
-
-    Returns
-    -------
-    best_candidates : list of str
-        A list of all the candidate filenames that are tied for first place.
-        Hopefully, the list will have a length of one.
-    """
-    params = {key: value for key, value in params.items() if value is not None}
-
-    best_candidates = []
-    best_n_matches = 0
-    for candidate in candidate_list:
-        n_matches = 0
-        candidate_disqualified = False
-        candidate_params = _parse_bids_filename(candidate, verbose=False)
-        for entity, value in params.items():
-            if entity in candidate_params:
-                if candidate_params[entity] is None:
-                    continue
-                elif candidate_params[entity] == value:
-                    n_matches += 1
-                else:
-                    # Incompatible entity found, candidate is disqualified
-                    candidate_disqualified = True
-                    break
-        if not candidate_disqualified:
-            if n_matches > best_n_matches:
-                best_n_matches = n_matches
-                best_candidates = [candidate]
-            elif n_matches == best_n_matches:
-                best_candidates.append(candidate)
-
-    return best_candidates
-
-
-def _find_matching_sidecar(bids_fname, bids_root, suffix, allow_fail=False):
-    """Try to find a sidecar file with a given suffix for a data file.
-
-    Parameters
-    ----------
-    bids_fname : str
-        Full name of the data file
-    bids_root : str | pathlib.Path
-        Path to root of the BIDS folder
-    suffix : str
-        The suffix of the sidecar file to be found. E.g., "_coordsystem.json"
-    allow_fail : bool
-        If False, will raise RuntimeError if not exactly one matching sidecar
-        was found. If True, will return None in that case. Defaults to False
-
-    Returns
-    -------
-    sidecar_fname : str | None
-        Path to the identified sidecar file, or None, if `allow_fail` is True
-        and no sidecar_fname was found
-
-    """
-    params = _parse_bids_filename(bids_fname, verbose=False)
-
-    # We only use subject and session as identifier, because all other
-    # parameters are potentially not binding for metadata sidecar files
-    search_str = 'sub-' + params['sub']
-    if params['ses'] is not None:
-        search_str += '_ses-' + params['ses']
-
-    # Find all potential sidecar files, doing a recursive glob
-    # from bids_root/sub_id/
-    search_str = op.join(bids_root, 'sub-' + params['sub'],
-                         '**', search_str + '*' + suffix)
-    candidate_list = glob.glob(search_str, recursive=True)
-    best_candidates = _find_best_candidates(params, candidate_list)
-
-    if len(best_candidates) == 1:
-        # Success
-        return best_candidates[0]
-
-    # We failed. Construct a helpful error message.
-    # If this was expected, simply return None, otherwise, raise an exception.
-    msg = None
-    if len(best_candidates) == 0:
-        msg = ('Did not find any {} file associated with {}.'
-               .format(suffix, bids_fname))
-    elif len(best_candidates) > 1:
-        # More than one candidates were tied for best match
-        msg = ('Expected to find a single {} file associated with '
-               '{}, but found {}: "{}".'
-               .format(suffix, bids_fname, len(candidate_list),
-                       candidate_list))
-    msg += '\n\nThe search_str was "{}"'.format(search_str)
-    if allow_fail:
-        warn(msg)
-        return None
-    else:
-        raise RuntimeError(msg)
-
-
 def _update_sidecar(sidecar_fname, key, val):
     """Update a sidecar JSON file with a given key/value pair.
 
     Parameters
     ----------
-    sidecar_fname : str
+    sidecar_fname : str | os.PathLike
         Full name of the data file
     key : str
         The key in the sidecar JSON file. E.g. "PowerLineFrequency"
@@ -658,69 +324,135 @@ def _update_sidecar(sidecar_fname, key, val):
         json.dump(sidecar_json, fout)
 
 
-def _estimate_line_freq(raw, verbose=False):
-    """Estimate power line noise from a given BaseRaw.
+def _scale_coord_to_meters(coord, unit):
+    """Scale units to meters (mne-python default)."""
+    if unit == 'cm':
+        return np.divide(coord, 100.)
+    elif unit == 'mm':
+        return np.divide(coord, 1000.)
+    else:
+        return coord
 
-    Uses 5 channels of either meg, eeg, ecog, or seeg to
-    estimate the line frequency.
+
+def _check_empty_room_basename(bids_path, on_invalid_er_task='raise'):
+    # only check task entity for emptyroom when it is the sidecar/MEG file
+    if bids_path.suffix == 'meg':
+        if bids_path.task != 'noise':
+            msg = (f'task must be "noise" if subject is "emptyroom", but '
+                   f'received: {bids_path.task}')
+            if on_invalid_er_task == 'raise':
+                raise ValueError(msg)
+            elif on_invalid_er_task == 'warn':
+                logger.critical(msg)
+            else:
+                pass
+
+
+def _check_anonymize(anonymize, raw, ext):
+    """Check the `anonymize` dict."""
+    # if info['meas_date'] None, then the dates are not stored
+    if raw.info['meas_date'] is None:
+        daysback = None
+    else:
+        if 'daysback' not in anonymize or anonymize['daysback'] is None:
+            raise ValueError('`daysback` argument required to anonymize.')
+        daysback = anonymize['daysback']
+        daysback_min, daysback_max = _get_anonymization_daysback(raw)
+        if daysback < daysback_min:
+            warn('`daysback` is too small; the measurement date '
+                 'is after 1925, which is not recommended by BIDS.'
+                 'The minimum `daysback` value for changing the '
+                 'measurement date of this data to before this date '
+                 f'is {daysback_min}')
+        if ext == '.fif' and daysback > daysback_max:
+            raise ValueError('`daysback` exceeds maximum value MNE '
+                             'is able to store in FIF format, must '
+                             f'be less than {daysback_max}')
+    keep_his = anonymize['keep_his'] if 'keep_his' in anonymize else False
+    return daysback, keep_his
+
+
+def _get_anonymization_daysback(raw):
+    """Get the min and max number of daysback necessary to satisfy BIDS specs.
 
     Parameters
     ----------
-    raw : mne.io.BaseRaw
+    raw : mne.io.Raw
+        Subject raw data.
 
     Returns
     -------
-    line_freq : int | None
-        Either 50, or 60 Hz depending if European,
-        or USA data recording.
+    daysback_min : int
+        The minimum number of daysback necessary to be compatible with BIDS.
+    daysback_max : int
+        The maximum number of daysback that MNE can store.
     """
-    sfreq = raw.info['sfreq']
+    this_date = _stamp_to_dt(raw.info['meas_date']).date()
+    daysback_min = (this_date - date(year=1924, month=12, day=31)).days
+    daysback_max = (this_date - datetime.fromtimestamp(0).date() +
+                    timedelta(seconds=np.iinfo('>i4').max)).days
+    return daysback_min, daysback_max
 
-    # if sampling is not high enough, line_freq does not matter
-    if sfreq < 100:
-        return None
 
-    # setup picks of the data to get at least 5 channels
-    pick_dict = {"meg": True}
-    picks = list(pick_types(raw.info, exclude='bads', **pick_dict))
-    if len(picks) < 5:
-        pick_dict = {"eeg": True}
-        picks = pick_types(raw.info, exclude='bads', **pick_dict)
-    if len(picks) < 5:
-        pick_dict = {"ecog": True}
-        picks = pick_types(raw.info, exclude='bads', **pick_dict)
-    if len(picks) < 5:
-        pick_dict = {"seeg": True}
-        picks = pick_types(raw.info, exclude='bads', **pick_dict)
-    if len(picks) < 5:
-        warn("Estimation of line frequency only "
-             "supports 'meg', 'eeg', 'ecog', or 'seeg'.")
-        return None
+def get_anonymization_daysback(raws):
+    """Get the group min and max number of daysback necessary for BIDS specs.
 
-    # only sample first 10 seconds, or whole time series
-    tmin = 0
-    tmax = int(min(len(raw.times), 10 * sfreq))
+    .. warning:: It is important that you remember the anonymization
+                 number if you would ever like to de-anonymize but
+                 that it is not included in the code publication
+                 as that would break the anonymization.
 
-    # get just five channels of data to estimate on
-    data = raw.get_data(start=tmin, stop=tmax,
-                        picks=picks, return_times=False)[0:5, :]
+    BIDS requires that anonymized dates be before 1925. In order to
+    preserve the longitudinal structure and ensure anonymization, the
+    user is asked to provide the same `daysback` argument to each call
+    of `write_raw_bids`. To determine the miniumum number of daysback
+    necessary, this function will calculate the minimum number based on
+    the most recent measurement date of raw objects.
 
-    # run a multi-taper FFT between Power Line Frequencies of interest
-    psds, freqs = psd_array_welch(data, fmin=49, fmax=61,
-                                  sfreq=sfreq, average="mean")
-    usa_ind = np.where(freqs == min(freqs, key=lambda x: abs(x - 60)))[0]
-    eu_ind = np.where(freqs == min(freqs, key=lambda x: abs(x - 50)))[0]
+    Parameters
+    ----------
+    raw : mne.io.Raw | list of Raw
+        Subject raw data or list of raw data from several subjects.
 
-    # get the average power within those frequency bands
-    usa_psd = np.mean((psds[..., usa_ind]))
-    eu_psd = np.mean((psds[..., eu_ind]))
+    Returns
+    -------
+    daysback_min : int
+        The minimum number of daysback necessary to be compatible with BIDS.
+    daysback_max : int
+        The maximum number of daysback that MNE can store.
+    """
+    if not isinstance(raws, list):
+        raws = list([raws])
+    daysback_min_list = list()
+    daysback_max_list = list()
+    for raw in raws:
+        if raw.info['meas_date'] is not None:
+            daysback_min, daysback_max = _get_anonymization_daysback(raw)
+            daysback_min_list.append(daysback_min)
+            daysback_max_list.append(daysback_max)
+    if not daysback_min_list or not daysback_max_list:
+        raise ValueError('All measurement dates are None, ' +
+                         'pass any `daysback` value to anonymize.')
+    daysback_min = max(daysback_min_list)
+    daysback_max = min(daysback_max_list)
+    if daysback_min > daysback_max:
+        raise ValueError('The dataset spans more time than can be ' +
+                         'accomodated by MNE, you may have to ' +
+                         'not follow BIDS recommendations and use' +
+                         'anonymized dates after 1925')
+    return daysback_min, daysback_max
 
-    if verbose is True:
-        print("EU (i.e. 50 Hz) PSD is {} and "
-              "USA (i.e. 60 Hz) PSD is {}".format(eu_psd, usa_psd))
 
-    if usa_psd > eu_psd:
-        line_freq = 60
-    else:
-        line_freq = 50
-    return line_freq
+def _stamp_to_dt(utc_stamp):
+    """Convert POSIX timestamp to datetime object in Windows-friendly way."""
+    # This is a windows datetime bug for timestamp < 0. A negative value
+    # is needed for anonymization which requires the date to be moved back
+    # to before 1925. This then requires a negative value of daysback
+    # compared the 1970 reference date.
+    if isinstance(utc_stamp, datetime):
+        return utc_stamp
+    stamp = [int(s) for s in utc_stamp]
+    if len(stamp) == 1:  # In case there is no microseconds information
+        stamp.append(0)
+    return (datetime.fromtimestamp(0, tz=timezone.utc) +
+            timedelta(0, stamp[0], stamp[1]))  # day, sec, μs

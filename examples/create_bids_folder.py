@@ -19,27 +19,27 @@ wish to create these files/folders on your own.
 ###############################################################################
 # First we will import the relevant functions
 
-from mne_bids import make_bids_folders, make_bids_basename
+from mne_bids import BIDSPath
 
 ###############################################################################
 # Creating file names for BIDS
 # ----------------------------
 #
 # BIDS requires a specific ordering and structure for metadata fields in
-# file paths, the function `make_bids_basename` allows you to specify many such
+# file paths, the class `BIDSPath` allows you to specify many such
 # pieces of metadata, ensuring that they are in the correct order in the
 # final file path. Omitted keys will not be included in the file path.
 
-bids_basename = make_bids_basename(subject='test', session='two',
-                                   task='mytask', suffix='data.csv')
-print(bids_basename)
+bids_path = BIDSPath(subject='test', session='two', task='mytask',
+                     suffix='events', extension='.tsv')
+print(bids_path)
 
 ###############################################################################
 # You may also omit the suffix, which will result in *only* a prefix for a
 # file name. This could then prepended to many more files.
 
-bids_basename = make_bids_basename(subject='test', task='mytask')
-print(bids_basename)
+bids_path = BIDSPath(subject='test', task='mytask')
+print(bids_path)
 
 ###############################################################################
 # Creating folders
@@ -47,10 +47,6 @@ print(bids_basename)
 #
 # You can also use MNE-BIDS to create folder hierarchies.
 
-path_folder = make_bids_folders('sub_01', session='mysession',
-                                kind='meg', bids_root='path/to/project',
-                                make_dir=False)
-print(path_folder)
-
-# Note that passing `make_dir=True` will create the folder hierarchy, ignoring
-# errors if the folder already exists.
+bids_path = BIDSPath(subject='01', session='mysession',
+                     datatype='meg', root='path/to/project').mkdir()
+print(bids_path.directory)

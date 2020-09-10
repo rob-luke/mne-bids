@@ -1,4 +1,6 @@
 """
+.. currentmodule:: mne_bids
+
 ====================================
 08. Convert iEEG data to BIDS format
 ====================================
@@ -7,15 +9,15 @@ In this example, we use MNE-BIDS to create a BIDS-compatible directory of iEEG
 data. Specifically, we will follow these steps:
 
 1. Download some iEEG data from the
-   `PhysioBank database <https://physionet.org/physiobank/database>`_
-   and the
    `MNE-ECoG ex <https://mne.tools/stable/auto_tutorials/misc/plot_ecog>`_.
 
 2. Load the data, extract information, and save in a new BIDS directory.
 
 3. Check the result and compare it with the standard.
 
-4. Confirm that written iEEG coordinates are the
+4. Cite MNE-BIDS
+
+5. Confirm that written iEEG coordinates are the
    same before :func:`write_raw_bids` was called.
 
 The iEEG data will be written by :func:`write_raw_bids` with
@@ -37,15 +39,15 @@ refer to the iEEG-BIDS specification.
 # License: BSD (3-clause)
 
 import os
-import tempfile
 from pprint import pprint
+from collections import OrderedDict
+import shutil
 
 import numpy as np
-from scipy.io import loadmat
 
 import mne
-from mne_bids import write_raw_bids, make_bids_basename, read_raw_bids
-from mne_bids.utils import print_dir_tree
+from mne_bids import (write_raw_bids, BIDSPath,
+                      read_raw_bids, print_dir_tree)
 
 ###############################################################################
 # Step 1: Download the data
@@ -59,15 +61,26 @@ from mne_bids.utils import print_dir_tree
 # Conveniently, there is already a data loading function available with
 # MNE-Python:
 
-# get MNE directory w/ example data
-mne_dir = mne.get_config('MNE_DATASETS_SAMPLE_PATH')
+misc_path = mne.datasets.misc.data_path(force_update=True)
 
-# The electrode coords data are in the Matlab format: '.mat'.
-# This is easy to read in with :func:`scipy.io.loadmat` function.
-mat = loadmat(mne.datasets.misc.data_path() + '/ecog/sample_ecog.mat')
-ch_names = mat['ch_names'].tolist()
-ch_names = [x.strip() for x in ch_names]
-elec = mat['elec']  # electrode positions given in meters
+
+# The electrode coords data are in the tsv file format
+# which is easily read in using numpy
+fname = misc_path + '/ecog/sample_ecog_electrodes.tsv'
+data = np.loadtxt(fname, dtype=str, delimiter='\t',
+                  comments=None, encoding='utf-8')
+column_names = data[0, :]
+info = data[1:, :]
+electrode_tsv = OrderedDict()
+for i, name in enumerate(column_names):
+    electrode_tsv[name] = info[:, i].tolist()
+
+# load in channel names
+ch_names = electrode_tsv['name']
+# load in the xyz coordinates as a float
+elec = np.empty(shape=(len(ch_names), 3))
+for ind, axis in enumerate(['x', 'y', 'z']):
+    elec[:, ind] = list(map(float, electrode_tsv[axis]))
 
 ###############################################################################
 # Now we make a montage stating that the iEEG contacts are in MRI
@@ -78,16 +91,20 @@ print('Created %s channel positions' % len(ch_names))
 print(dict(zip(ch_names, elec)))
 
 ###############################################################################
-# We also need to get some sample iEEG data,
-# so we will just generate random data from white noise.
-# Here is where you would use your own data if you had it.
-ieegdata = np.random.rand(len(ch_names), 1000)
-
-# We will create a :func:`mne.io.RawArray` object and
+# We will load a :class:`mne.io.Raw` object and
 # use the montage we created.
 info = mne.create_info(ch_names, 1000., 'ecog')
-raw = mne.io.RawArray(ieegdata, info)
-raw.set_montage(montage)
+raw = mne.io.read_raw_edf(misc_path + '/ecog/sample_ecog.edf')
+raw.info['line_freq'] = 60  # specify power line frequency as required by BIDS
+raw.set_channel_types({ch: 'ecog' for ch in raw.ch_names})
+
+# set the bad channels
+raw.info['bads'].extend(['BTM1', 'BTM2', 'BTM3', 'BTM4', 'BTM5', 'BTM6',
+                         'BTP1', 'BTP2', 'BTP3', 'BTP4', 'BTP5', 'BTP6',
+                         'EKGL', 'EKGR'])
+
+# set montage
+raw.set_montage(montage, on_missing='warn')
 
 ###############################################################################
 # Let us confirm what our channel coordinates look like.
@@ -131,8 +148,14 @@ print(write_raw_bids.__doc__)
 subject_id = '001'  # zero padding to account for >100 subjects in this dataset
 task = 'testresteyes'
 
+# get MNE directory w/ example data
+mne_data_dir = mne.get_config('MNE_DATASETS_MISC_PATH')
+
 # There is the root directory for where we will write our data.
-bids_root = os.path.join(mne_dir, 'ieegmmidb_bids')
+bids_root = os.path.join(mne_data_dir, 'ieegmmidb_bids')
+
+# make sure we start w/ an empty bids root
+shutil.rmtree(bids_root, ignore_errors=True)
 
 ###############################################################################
 # Now we just need to specify a few iEEG details to make things work:
@@ -142,19 +165,12 @@ bids_root = os.path.join(mne_dir, 'ieegmmidb_bids')
 # temporarily save the data to disc before reading it back in.
 
 # Now convert our data to be in a new BIDS dataset.
-bids_basename = make_bids_basename(subject=subject_id,
-                                   task=task,
-                                   acquisition="ecog")
+bids_path = BIDSPath(subject=subject_id,
+                     task=task, acquisition="ecog", root=bids_root)
 
-# need to set the filenames if we are initializing data from array
-with tempfile.TemporaryDirectory() as tmp_root:
-    tmp_fpath = os.path.join(tmp_root, "test_raw.fif")
-    raw.save(tmp_fpath)
-    raw = mne.io.read_raw_fif(tmp_fpath)
-
-    # write `raw` to BIDS and anonymize it into BrainVision format
-    write_raw_bids(raw, bids_basename, bids_root=bids_root,
-                   anonymize=dict(daysback=30000), overwrite=True)
+# write `raw` to BIDS and anonymize it into BrainVision format
+write_raw_bids(raw, bids_path, anonymize=dict(daysback=30000),
+               overwrite=True)
 
 ###############################################################################
 # Step 3: Check and compare with standard
@@ -162,6 +178,17 @@ with tempfile.TemporaryDirectory() as tmp_root:
 
 # Now we have written our BIDS directory.
 print_dir_tree(bids_root)
+
+###############################################################################
+# Step 4: Cite mne-bids
+# ---------------------
+# We can see that the appropriate citations are already written in the README.
+# If you are preparing a manuscript, please make sure to also cite MNE-BIDS
+# there.
+readme = os.path.join(bids_root, 'README')
+with open(readme, 'r') as fid:
+    text = fid.read()
+print(text)
 
 ###############################################################################
 # MNE-BIDS has created a suitable directory structure for us, and among other
@@ -184,15 +211,14 @@ print_dir_tree(bids_root)
 # Command line tool: https://www.npmjs.com/package/bids-validator
 
 ###############################################################################
-# Step 4: Plot output channels and check that they match!
+# Step 5: Plot output channels and check that they match!
 # -------------------------------------------------------
 #
 # Now we have written our BIDS directory. We can use
 # :func:`read_raw_bids` to read in the data.
 
 # read in the BIDS dataset and plot the coordinates
-bids_fname = bids_basename + "_ieeg.vhdr"
-raw = read_raw_bids(bids_fname, bids_root=bids_root)
+raw = read_raw_bids(bids_path=bids_path)
 
 # get the first 5 channels and show their locations
 # this should match what was printed earlier.
@@ -201,6 +227,9 @@ dig = [raw.info['dig'][pick] for pick in picks]
 chs = [raw.info['chs'][pick] for pick in picks]
 pos = np.array([ch['r'] for ch in dig[:5]])
 ch_names = np.array([ch['ch_name'] for ch in chs[:5]])
+
+print("The channel montage after writing into BIDS: ")
+pprint(dig[0:5])
 print("The channel coordinates after writing into BIDS: ")
 pprint([x for x in zip(ch_names, pos)])
 

@@ -12,8 +12,15 @@ Here we list the Application Programming Interface (API) for MNE-BIDS.
    :local:
    :depth: 2
 
-MNE BIDS (:py:mod:`mne_bids`)
-=============================
+
+MNE BIDS
+========
+
+:py:mod:`mne_bids`:
+
+.. automodule:: mne_bids
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne_bids
 
@@ -22,28 +29,42 @@ MNE BIDS (:py:mod:`mne_bids`)
 
    write_raw_bids
    read_raw_bids
-   make_bids_folders
-   make_bids_basename
+   BIDSPath
    make_dataset_description
+   make_report
    write_anat
+   mark_bad_channels
    get_head_mri_trans
-   get_matched_empty_room
    get_anonymization_daysback
+   print_dir_tree
+   get_entity_vals
+   get_datatypes
 
-Utils (:py:mod:`mne_bids.utils`)
-================================
+Path
+====
 
-.. currentmodule:: mne_bids.utils
+:py:mod:`mne_bids.path`:
+
+.. automodule:: mne_bids.path
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne_bids.path
 
 .. autosummary::
    :toctree: generated/
 
-   print_dir_tree
-   get_entity_vals
-   get_kinds
+   BIDSPath
+   get_entities_from_fname
 
-Copyfiles (:py:mod:`mne_bids.copyfiles`)
-========================================
+Copyfiles
+=========
+
+:py:mod:`mne_bids.copyfiles`:
+
+.. automodule:: mne_bids.copyfiles
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne_bids.copyfiles
 
@@ -56,13 +77,19 @@ Copyfiles (:py:mod:`mne_bids.copyfiles`)
    copyfile_bti
    copyfile_kit
 
-Datasets (:py:mod:`mne_bids.datasets`)
-======================================
 
-.. currentmodule:: mne_bids.datasets
+Utils
+=====
+
+:py:mod:`mne_bids.utils`:
+
+.. automodule:: mne_bids.utils
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne_bids.utils
 
 .. autosummary::
-    :toctree: generated/
+   :toctree: generated/
 
-    fetch_faces_data
-    fetch_brainvision_testing_data
+   get_anonymization_daysback

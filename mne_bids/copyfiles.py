@@ -17,12 +17,14 @@ due to internal pointers that are not being updated.
 import os
 import os.path as op
 import re
+
 import shutil as sh
 
+from mne.io import read_raw_brainvision, anonymize_info
 from scipy.io import loadmat, savemat
 
-from mne_bids.read import _parse_ext
-from mne_bids.utils import _get_mrk_meas_date
+from mne_bids.path import BIDSPath, _parse_ext, _mkdir_p
+from mne_bids.utils import _get_mrk_meas_date, _check_anonymize
 
 
 def _copytree(src, dst, **kwargs):
@@ -65,7 +67,7 @@ def _get_brainvision_encoding(vhdr_file, verbose=False):
             enc = 'UTF-8'
             src = '(default)'
         if verbose is True:
-            print('Detected file encoding: %s %s.' % (enc, src))
+            print(f'Detected file encoding: {enc} {src}.')
     return enc
 
 
@@ -86,8 +88,8 @@ def _get_brainvision_paths(vhdr_path):
     """
     fname, ext = _parse_ext(vhdr_path)
     if ext != '.vhdr':
-        raise ValueError('Expecting file ending in ".vhdr",'
-                         ' but got {}'.format(ext))
+        raise ValueError(f'Expecting file ending in ".vhdr",'
+                         f' but got {ext}')
 
     # Header file seems fine
     # extract encoding from brainvision header file, or default to utf-8
@@ -101,7 +103,7 @@ def _get_brainvision_paths(vhdr_path):
     eeg_file_match = re.search(r'DataFile=(.*\.eeg)', ' '.join(lines))
     if not eeg_file_match:
         raise ValueError('Could not find a .eeg file link in'
-                         ' {}'.format(vhdr_path))
+                         f' {vhdr_path}')
     else:
         eeg_file = eeg_file_match.groups()[0]
 
@@ -109,7 +111,7 @@ def _get_brainvision_paths(vhdr_path):
     vmrk_file_match = re.search(r'MarkerFile=(.*\.vmrk)', ' '.join(lines))
     if not vmrk_file_match:
         raise ValueError('Could not find a .vmrk file link in'
-                         ' {}'.format(vhdr_path))
+                         f' {vhdr_path}')
     else:
         vmrk_file = vmrk_file_match.groups()[0]
 
@@ -176,10 +178,13 @@ def copyfile_kit(src, dest, subject_id, session_id,
         Extract information of marker and headpoints
 
     """
-    from mne_bids.write import make_bids_basename
+    # create parent directories in case it does not exist yet
+    _mkdir_p(op.dirname(dest))
+
     # KIT data requires the marker file to be copied over too
     sh.copyfile(src, dest)
     data_path = op.split(dest)[0]
+    datatype = 'meg'
     if 'mrk' in _init_kwargs:
         hpi = _init_kwargs['mrk']
         acq_map = dict()
@@ -192,24 +197,53 @@ def copyfile_kit(src, dest, subject_id, session_id,
             _, marker_ext = _parse_ext(hpi)
             acq_map[None] = hpi
         for key, value in acq_map.items():
-            marker_fname = make_bids_basename(
+            marker_path = BIDSPath(
                 subject=subject_id, session=session_id, task=task, run=run,
-                acquisition=key, suffix='markers%s' % marker_ext,
-                prefix=data_path)
-            sh.copyfile(value, marker_fname)
+                acquisition=key, suffix='markers', extension=marker_ext,
+                datatype=datatype)
+            sh.copyfile(value, op.join(data_path, marker_path.basename))
     for acq in ['elp', 'hsp']:
         if acq in _init_kwargs:
             position_file = _init_kwargs[acq]
             task, run, acq = None, None, acq.upper()
             position_ext = '.pos'
-            position_fname = make_bids_basename(
+            position_path = BIDSPath(
                 subject=subject_id, session=session_id, task=task, run=run,
-                acquisition=acq, suffix='headshape%s' % position_ext,
-                prefix=data_path)
-            sh.copyfile(position_file, position_fname)
+                acquisition=acq, suffix='headshape', extension=position_ext,
+                datatype=datatype)
+            sh.copyfile(position_file,
+                        op.join(data_path, position_path.basename))
 
 
-def copyfile_brainvision(vhdr_src, vhdr_dest, verbose=False):
+def _replace_file(fname, pattern, replace):
+    """Overwrite file, replacing end of lines matching pattern with replace."""
+    new_content = []
+    for line in open(fname, 'r'):
+        match = re.match(pattern, line)
+        if match:
+            line = match.group()[:-len(replace)] + replace + '\n'
+        new_content.append(line)
+
+    with open(fname, 'w') as fout:
+        fout.writelines(new_content)
+
+
+def _anonymize_brainvision(vhdr_file, date):
+    """Anonymize vmrk and vhdr files in place using `date` datetime object."""
+    _, vmrk_file = _get_brainvision_paths(vhdr_file)
+
+    # Go through VMRK
+    pattern = re.compile(r'^Mk\d+=New Segment,.*,\d+,\d+,\d+,\d{20}$')
+    replace = date.strftime('%Y%m%d%H%M%S%f')
+    _replace_file(vmrk_file, pattern, replace)
+
+    # Go through VHDR
+    pattern = re.compile(r'^Impedance \[kOhm\] at \d\d:\d\d:\d\d :$')
+    replace = f'at {date.strftime("%H:%M:%S")} :'
+    _replace_file(vhdr_file, pattern, replace)
+
+
+def copyfile_brainvision(vhdr_src, vhdr_dest, anonymize=None, verbose=False):
     """Copy a BrainVision file triplet to a new location and repair links.
 
     The BrainVision file format consists of three files: .vhdr, .eeg, and .vmrk
@@ -223,14 +257,38 @@ def copyfile_brainvision(vhdr_src, vhdr_dest, verbose=False):
         The src path of the .vhdr file to be copied.
     vhdr_dest : str
         The destination path of the .vhdr file.
+    anonymize : dict | None
+        If None (default), no anonymization is performed.
+        If dict, data will be anonymized depending on the keys provided with
+        the dict: `daysback` is a required key, `keep_his` is an optional key.
+
+        `daysback` : int
+            Number of days by which to move back the recording date in time.
+            In studies with multiple subjects the relative recording date
+            differences between subjects can be kept by using the same number
+            of `daysback` for all subject anonymizations. `daysback` should be
+            great enough to shift the date prior to 1925 to conform with BIDS
+            anonymization rules.
+
+        `keep_his` : bool
+            By default (False), all subject information next to the recording
+            date will be overwritten as well. If True, keep subject information
+            apart from the recording date.
+
+    verbose : bool
+        Determine whether results should be logged. Defaults to False.
+
+    See Also
+    --------
+    mne.io.anonymize_info
 
     """
     # Get extenstion of the brainvision file
     fname_src, ext_src = _parse_ext(vhdr_src)
     fname_dest, ext_dest = _parse_ext(vhdr_dest)
     if ext_src != ext_dest:
-        raise ValueError('Need to move data with same extension'
-                         ' but got "{}", "{}"'.format(ext_src, ext_dest))
+        raise ValueError(f'Need to move data with same extension'
+                         f' but got "{ext_src}", "{ext_dest}"')
 
     eeg_file_path, vmrk_file_path = _get_brainvision_paths(vhdr_src)
 
@@ -264,11 +322,21 @@ def copyfile_brainvision(vhdr_src, vhdr_dest, verbose=False):
                     line = line.replace(basename_src, basename_dest)
                 fout.write(line)
 
+    if anonymize is not None:
+        raw = read_raw_brainvision(vhdr_src, preload=False, verbose=0)
+        daysback, keep_his = _check_anonymize(anonymize, raw, '.vhdr')
+        raw.info = anonymize_info(raw.info, daysback=daysback,
+                                  keep_his=keep_his)
+        _anonymize_brainvision(fname_dest + '.vhdr',
+                               date=raw.info['meas_date'])
+
     if verbose:
         for ext in ['.eeg', '.vhdr', '.vmrk']:
-            print('Created "{}" in "{}"'
-                  .format(fname_dest + ext,
-                          op.dirname(op.realpath(vhdr_dest))))
+            _, fname = os.path.split(fname_dest + ext)
+            dirname = op.dirname(op.realpath(vhdr_dest))
+            print(f'Created "{fname}" in "{dirname}".')
+        if anonymize:
+            print('Anonymized all dates in VHDR and VMRK.')
 
 
 def copyfile_eeglab(src, dest):
@@ -292,13 +360,13 @@ def copyfile_eeglab(src, dest):
     fname_dest, ext_dest = _parse_ext(dest)
     if ext_src != ext_dest:
         raise ValueError('Need to move data with same extension'
-                         ' but got {}, {}'.format(ext_src, ext_dest))
+                         f' but got {ext_src}, {ext_dest}')
 
     # Extract matlab struct "EEG" from EEGLAB file
     mat = loadmat(src, squeeze_me=False, chars_as_strings=False,
                   mat_dtype=False, struct_as_record=True)
     if 'EEG' not in mat:
-        raise ValueError('Could not find "EEG" field in {}'.format(src))
+        raise ValueError(f'Could not find "EEG" field in {src}')
     eeg = mat['EEG']
 
     # If the data field is a string, it points to a .fdt file in src dir
@@ -309,8 +377,8 @@ def copyfile_eeglab(src, dest):
         fdt_path = op.join(head, fdt_pointer)
         fdt_name, fdt_ext = _parse_ext(fdt_path)
         if fdt_ext != '.fdt':
-            raise IOError('Expected extension {} for linked data but found'
-                          ' {}'.format('.fdt', fdt_ext))
+            raise IOError('Expected extension .fdt for linked data but found'
+                          f' {fdt_ext}')
 
         # Copy the fdt file and give it a new name
         sh.copyfile(fdt_path, fname_dest + '.fdt')

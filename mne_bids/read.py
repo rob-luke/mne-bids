@@ -7,7 +7,6 @@
 #
 # License: BSD (3-clause)
 import os.path as op
-from datetime import datetime
 import glob
 import json
 
@@ -18,23 +17,17 @@ from mne.utils import has_nibabel, logger, warn
 from mne.coreg import fit_matched_points
 from mne.transforms import apply_trans
 
+from mne_bids.dig import _read_dig_bids
 from mne_bids.tsv_handler import _from_tsv, _drop
-from mne_bids.config import ALLOWED_EXTENSIONS, \
-    _convert_hand_options, _convert_sex_options
-from mne_bids.utils import (_parse_bids_filename, _extract_landmarks,
-                            _find_matching_sidecar, _parse_ext,
-                            _get_ch_type_mapping, make_bids_folders,
-                            _estimate_line_freq)
 
-reader = {'.con': io.read_raw_kit, '.sqd': io.read_raw_kit,
-          '.fif': io.read_raw_fif, '.pdf': io.read_raw_bti,
-          '.ds': io.read_raw_ctf, '.vhdr': io.read_raw_brainvision,
-          '.edf': io.read_raw_edf, '.bdf': io.read_raw_bdf,
-          '.nirx': io.read_raw_nirx, '.set': io.read_raw_eeglab}
+from mne_bids.config import ALLOWED_DATATYPE_EXTENSIONS, reader, _map_options
+from mne_bids.utils import _extract_landmarks, _get_ch_type_mapping
+from mne_bids.path import (BIDSPath, _parse_ext, _find_matching_sidecar,
+                           _infer_datatype)
 
+def _read_raw(raw_fpath, electrode=None, hsp=None, hpi=None,
+              allow_maxshield=False, config=None, verbose=None, **kwargs):
 
-def _read_raw(raw_fpath, electrode=None, hsp=None, hpi=None, config=None,
-              verbose=None, **kwargs):
     """Read a raw file into MNE, making inferences based on extension."""
     _, ext = _parse_ext(raw_fpath)
 
@@ -51,28 +44,23 @@ def _read_raw(raw_fpath, electrode=None, hsp=None, hpi=None, config=None,
                               **kwargs)
 
     elif ext == '.fif':
-        raw = reader[ext](raw_fpath, **kwargs)
+        raw = reader[ext](raw_fpath, allow_maxshield, **kwargs)
 
-    elif ext in ['.ds', '.vhdr', '.set']:
+    elif ext in ['.ds', '.vhdr', '.set', '.edf', '.bdf']:
         raw = reader[ext](raw_fpath, **kwargs)
-
-    # EDF (european data format) or BDF (biosemi) format
-    # TODO: integrate with lines above once MNE can read
-    # annotations with preload=False
-    elif ext in ['.edf', '.bdf']:
-        raw = reader[ext](raw_fpath, preload=True, **kwargs)
 
     # MEF and NWB are allowed, but not yet implemented
     elif ext in ['.mef', '.nwb']:
-        raise ValueError('Got "{}" as extension. This is an allowed extension '
-                         'but there is no IO support for this file format yet.'
-                         .format(ext))
+        raise ValueError(f'Got "{ext}" as extension. This is an allowed '
+                         f'extension but there is no IO support for this '
+                         f'file format yet.')
 
     # No supported data found ...
     # ---------------------------
     else:
-        raise ValueError('Raw file name extension must be one of {}\n'
-                         'Got {}'.format(ALLOWED_EXTENSIONS, ext))
+        raise ValueError(f'Raw file name extension must be one '
+                         f'of {ALLOWED_DATATYPE_EXTENSIONS}\n'
+                         f'Got {ext}')
     return raw
 
 
@@ -84,20 +72,17 @@ def _handle_participants_reading(participants_fname, raw,
 
     # set data from participants tsv into subject_info
     for infokey, infovalue in participants_tsv.items():
-        if infokey == 'sex':
-            value = _convert_sex_options(infovalue[row_ind],
-                                         fro='bids', to='mne')
+        if infokey == 'sex' or infokey == 'hand':
+            value = _map_options(what=infokey, key=infovalue[row_ind],
+                                 fro='bids', to='mne')
             # We don't know how to translate to MNE, so skip.
             if value is None:
-                warn('Unable to map `sex` value to MNE. '
-                     'Not setting subject sex.')
-        elif infokey == 'hand':
-            value = _convert_hand_options(infovalue[row_ind],
-                                          fro='bids', to='mne')
-            # We don't know how to translate to MNE, so skip.
-            if value is None:
-                warn('Unable to map `hand` value to MNE. '
-                     'Not setting subject handedness.')
+                if infokey == 'sex':
+                    info_str = 'subject sex'
+                else:
+                    info_str = 'subject handedness'
+                warn(f'Unable to map `{infokey}` value to MNE. '
+                     f'Not setting {info_str}.')
         else:
             value = infovalue[row_ind]
         # add data into raw.Info
@@ -121,20 +106,10 @@ def _handle_info_reading(sidecar_fname, raw, verbose=None):
     if line_freq == "n/a":
         line_freq = None
 
-    if line_freq is None and raw.info["line_freq"] is None:
-        # estimate line noise using PSD from multitaper FFT
-        powerlinefrequency = _estimate_line_freq(raw, verbose=verbose)
-        raw.info["line_freq"] = powerlinefrequency
-        warn('No line frequency found, defaulting to {} Hz '
-             'estimated from multi-taper FFT '
-             'on 10 seconds of data.'.format(powerlinefrequency))
+    if raw.info["line_freq"] is not None and line_freq is None:
+        line_freq = raw.info["line_freq"]  # take from file is present
 
-    elif raw.info["line_freq"] is None and line_freq is not None:
-        # if the read in frequency is not set inside Raw
-        # -> set it to what the sidecar JSON specifies
-        raw.info["line_freq"] = line_freq
-    elif raw.info["line_freq"] is not None \
-            and line_freq is not None:
+    if raw.info["line_freq"] is not None and line_freq is not None:
         # if both have a set Power Line Frequency, then
         # check that they are the same, else there is a
         # discrepency in the metadata of the dataset.
@@ -145,6 +120,7 @@ def _handle_info_reading(sidecar_fname, raw, verbose=None):
                              "Raw is -> {} ".format(raw.info["line_freq"]),
                              "Sidecar JSON is -> {} ".format(line_freq))
 
+    raw.info["line_freq"] = line_freq
     return raw
 
 
@@ -195,71 +171,15 @@ def _handle_events_reading(events_fname, raw):
     return raw
 
 
-def _handle_electrodes_reading(electrodes_fname, coord_frame, raw, verbose):
-    """Read associated electrodes.tsv and populate raw.
+def _get_bads_from_tsv_data(tsv_data):
+    """Extract names of bads from data read from channels.tsv."""
+    idx = []
+    for ch_idx, status in enumerate(tsv_data['status']):
+        if status.lower() == 'bad':
+            idx.append(ch_idx)
 
-    Handle xyz coordinates and coordinate frame of each channel.
-    Assumes units of coordinates are in 'm'.
-    """
-    logger.info('Reading electrode '
-                'coords from {}.'.format(electrodes_fname))
-    electrodes_dict = _from_tsv(electrodes_fname)
-    # First, make sure that ordering of names in channels.tsv matches the
-    # ordering of names in the raw data. The "name" column is mandatory in BIDS
-    ch_names_raw = list(raw.ch_names)
-    ch_names_tsv = electrodes_dict['name']
-
-    if ch_names_raw != ch_names_tsv:
-        msg = ('Channels do not correspond between raw data and the '
-               'channels.tsv file. For MNE-BIDS, the channel names in the '
-               'tsv MUST be equal and in the same order as the channels in '
-               'the raw data.\n\n'
-               '{} channels in tsv file: "{}"\n\n --> {}\n\n'
-               '{} channels in raw file: "{}"\n\n --> {}\n\n'
-               .format(len(ch_names_tsv), electrodes_fname, ch_names_tsv,
-                       len(ch_names_raw), raw.filenames, ch_names_raw)
-               )
-
-        # XXX: this could be due to MNE inserting a 'STI 014' channel as the
-        # last channel: In that case, we can work. --> Can be removed soon,
-        # because MNE will stop the synthesis of stim channels in the near
-        # future
-        if not (ch_names_raw[-1] == 'STI 014' and
-                ch_names_raw[:-1] == ch_names_tsv):
-            raise RuntimeError(msg)
-
-    if verbose:
-        print("The read in electrodes file is: \n", electrodes_dict)
-
-    def _float_or_nan(val):
-        if val == "n/a":
-            return np.nan
-        else:
-            return float(val)
-
-    # convert coordinates to float and create list of tuples
-    electrodes_dict['x'] = [_float_or_nan(x) for x in electrodes_dict['x']]
-    electrodes_dict['y'] = [_float_or_nan(x) for x in electrodes_dict['y']]
-    electrodes_dict['z'] = [_float_or_nan(x) for x in electrodes_dict['z']]
-    ch_locs = list(zip(electrodes_dict['x'],
-                       electrodes_dict['y'],
-                       electrodes_dict['z']))
-
-    # determine if there are problematic channels
-    nan_chs = []
-    for ch_name, ch_coord in zip(ch_names_raw, ch_locs):
-        if any(np.isnan(ch_coord)) and ch_name not in raw.info['bads']:
-            nan_chs.append(ch_name)
-    if len(nan_chs) > 0:
-        warn("There are channels without locations "
-             "(n/a) that are not marked as bad: {}".format(nan_chs))
-
-    # create mne.DigMontage
-    ch_pos = dict(zip(ch_names_raw, np.array(ch_locs)))
-    montage = mne.channels.make_dig_montage(ch_pos=ch_pos,
-                                            coord_frame=coord_frame)
-    raw.set_montage(montage)
-    return raw
+    bads = [tsv_data['name'][i] for i in idx]
+    return bads
 
 
 def _handle_channels_reading(channels_fname, bids_fname, raw):
@@ -307,6 +227,19 @@ def _handle_channels_reading(channels_fname, bids_fname, raw):
         # Try to map from BIDS nomenclature to MNE, leave channel type
         # untouched if we are uncertain
         updated_ch_type = bids_to_mne_ch_types.get(ch_type, None)
+
+        if updated_ch_type is None:
+            # XXX Try again with uppercase spelling – this should be removed
+            # XXX once https://github.com/bids-standard/bids-validator/issues/1018  # noqa:E501
+            # XXX has been resolved.
+            # XXX x-ref https://github.com/mne-tools/mne-bids/issues/481
+            updated_ch_type = bids_to_mne_ch_types.get(ch_type.upper(), None)
+            if updated_ch_type is not None:
+                msg = ('The BIDS dataset contains channel types in lowercase '
+                       'spelling. This violates the BIDS specification and '
+                       'will raise an error in the future.')
+                warn(msg)
+
         if updated_ch_type is not None:
             channel_type_dict[ch_name] = updated_ch_type
 
@@ -317,19 +250,29 @@ def _handle_channels_reading(channels_fname, bids_fname, raw):
     # good and bad channels
     if 'status' in channels_dict:
         # find bads from channels.tsv
-        bad_bool = [True if chn.lower() == 'bad' else False
-                    for chn in channels_dict['status']]
-        bads = np.asarray(channels_dict['name'])[bad_bool]
+        bads_from_tsv = _get_bads_from_tsv_data(channels_dict)
 
-        # merge with bads already present in raw data file (if there are any)
-        unique_bads = set(raw.info['bads']).union(set(bads))
-        raw.info['bads'] = list(unique_bads)
+        if raw.info['bads'] and set(bads_from_tsv) != set(raw.info['bads']):
+            warn(f'Encountered conflicting information on channel status '
+                 f'between {op.basename(channels_fname)} and the associated '
+                 f'raw data file.\n'
+                 f'Channels marked as bad in '
+                 f'{op.basename(channels_fname)}: {bads_from_tsv}\n'
+                 f'Channels marked as bad in '
+                 f'raw.info["bads"]: {raw.info["bads"]}\n'
+                 f'Setting list of bad channels to: {bads_from_tsv}')
+
+        raw.info['bads'] = bads_from_tsv
+    elif raw.info['bads']:
+        # We do have info['bads'], but no `status` in channels.tsv
+        logger.info(f'No "status" column found in '
+                    f'{op.basename(channels_fname)}; using list of bad '
+                    f'channels found in raw.info["bads"]: {raw.info["bads"]}')
 
     return raw
 
 
-def read_raw_bids(bids_fname, bids_root, extra_params=None,
-                  verbose=True):
+def read_raw_bids(bids_path, extra_params=None, verbose=True):
     """Read BIDS compatible data.
 
     Will attempt to read associated events.tsv and channels.tsv files to
@@ -337,50 +280,73 @@ def read_raw_bids(bids_fname, bids_root, extra_params=None,
 
     Parameters
     ----------
-    bids_fname : str
-        Full name of the data file
-    bids_root : str | pathlib.Path
-        Path to root of the BIDS folder
+    bids_path : BIDSPath
+        The file to read. The :class:`mne_bids.BIDSPath` instance passed here
+        **must** have the ``.root`` attribute set. The ``.datatype`` attribute
+        **may** be set. If ``.datatype`` is not set and only one data type
+        (e.g., only EEG or MEG data) is present in the dataset, it will be
+        selected automatically.
     extra_params : None | dict
         Extra parameters to be passed to MNE read_raw_* functions.
         If a dict, for example: ``extra_params=dict(allow_maxshield=True)``.
     verbose : bool
-        The verbosity level
+        The verbosity level.
 
     Returns
     -------
     raw : instance of Raw
         The data as MNE-Python Raw object.
 
+    Raises
+    ------
+    RuntimeError
+        If multiple recording data types are present in the dataset, but
+        ``datatype=None``.
+
+    RuntimeError
+        If more than one data files exist for the specified recording.
+
+    RuntimeError
+        If no data file in a supported format can be located.
+
+    ValueError
+        If the specified ``datatype`` cannot be found in the dataset.
+
     """
-    # Full path to data file is needed so that mne-bids knows
-    # what is the modality -- meg, eeg, ieeg to read
-    bids_fname = op.basename(bids_fname)
-    bids_basename = '_'.join(bids_fname.split('_')[:-1])
-    kind = bids_fname.split('_')[-1].split('.')[0]
-    _, ext = _parse_ext(bids_fname)
+    if not isinstance(bids_path, BIDSPath):
+        raise RuntimeError('"bids_path" must be a BIDSPath object. Please '
+                           'instantiate using mne_bids.BIDSPath().')
 
-    # Get the BIDS parameters (=entities)
-    params = _parse_bids_filename(bids_basename, verbose)
+    bids_path = bids_path.copy()
+    sub = bids_path.subject
+    ses = bids_path.session
+    bids_root = bids_path.root
+    datatype = bids_path.datatype
+    suffix = bids_path.suffix
 
-    # Construct the path to the "kind" where the data is stored
-    # Subject is mandatory ...
-    kind_dir = op.join(bids_root, 'sub-{}'.format(params['sub']))
-    # Session is optional ...
-    if params['ses'] is not None:
-        kind_dir = op.join(kind_dir, 'ses-{}'.format(params['ses']))
-    # Kind is mandatory
-    kind_dir = op.join(kind_dir, kind)
+    # check root available
+    if bids_root is None:
+        raise ValueError('The root of the "bids_path" must be set. '
+                         'Please use `bids_path.update(root="<root>")` '
+                         'to set the root of the BIDS folder to read.')
 
-    config = None
-    if ext in ('.fif', '.ds', '.vhdr', '.edf', '.bdf', '.set', '.sqd', '.con'):
-        bids_fpath = op.join(kind_dir,
-                             bids_basename + '_{}{}'.format(kind, ext))
+    # infer the datatype and suffix if they are not present in the BIDSPath
+    if datatype is None:
+        datatype = _infer_datatype(bids_root=bids_root, sub=sub, ses=ses)
+        bids_path.update(datatype=datatype)
+    if suffix is None:
+        bids_path.update(suffix=datatype)
 
-    elif ext == '.pdf':
-        bids_raw_folder = op.join(kind_dir, bids_basename + '_{}'.format(kind))
+    data_dir = bids_path.directory
+    bids_fname = bids_path.fpath.name
+
+    if op.splitext(bids_fname)[1] == '.pdf':
+        bids_raw_folder = op.join(data_dir, f'{bids_path.basename}')
         bids_fpath = glob.glob(op.join(bids_raw_folder, 'c,rf*'))[0]
         config = op.join(bids_raw_folder, 'config')
+    else:
+        bids_fpath = op.join(data_dir, bids_fname)
+        config = None
 
     if extra_params is None:
         extra_params = dict()
@@ -389,60 +355,53 @@ def read_raw_bids(bids_fname, bids_root, extra_params=None,
 
     # Try to find an associated events.tsv to get information about the
     # events in the recorded data
-    events_fname = _find_matching_sidecar(bids_fname, bids_root, 'events.tsv',
+    events_fname = _find_matching_sidecar(bids_path, suffix='events',
+                                          extension='.tsv',
                                           allow_fail=True)
     if events_fname is not None:
         raw = _handle_events_reading(events_fname, raw)
 
     # Try to find an associated channels.tsv to get information about the
     # status and type of present channels
-    channels_fname = _find_matching_sidecar(bids_fname, bids_root,
-                                            'channels.tsv', allow_fail=True)
+    channels_fname = _find_matching_sidecar(bids_path,
+                                            suffix='channels',
+                                            extension='.tsv',
+                                            allow_fail=True)
     if channels_fname is not None:
         raw = _handle_channels_reading(channels_fname, bids_fname, raw)
 
     # Try to find an associated electrodes.tsv and coordsystem.json
     # to get information about the status and type of present channels
-    electrodes_fname = _find_matching_sidecar(bids_fname, bids_root,
-                                              'electrodes.tsv',
+    electrodes_fname = _find_matching_sidecar(bids_path,
+                                              suffix='electrodes',
+                                              extension='.tsv',
                                               allow_fail=True)
-    coordsystem_fname = _find_matching_sidecar(bids_fname, bids_root,
-                                               'coordsystem.json',
+    coordsystem_fname = _find_matching_sidecar(bids_path,
+                                               suffix='coordsystem',
+                                               extension='.json',
                                                allow_fail=True)
     if electrodes_fname is not None:
         if coordsystem_fname is None:
-            raise RuntimeError("BIDS mandates that the coordsystem.json "
-                               "should exist if electrodes.tsv does. "
-                               "Please create coordsystem.json for"
-                               "{}".format(bids_basename))
-        # Get MRI landmarks from the JSON sidecar
-        with open(coordsystem_fname, 'r') as fin:
-            coordsystem_json = json.load(fin)
-
-        # Get coordinate frames that electrode coordinates are in
-        if kind == "meg":
-            coord_frame = coordsystem_json['MEGCoordinateSystem']
-        elif kind == "ieeg":
-            coord_frame = coordsystem_json['iEEGCoordinateSystem']
-        else:
-            raise RuntimeError("Kind {} not supported yet for "
-                               "coordsystem.json and "
-                               "electrodes.tsv.".format(kind))
-        # read in electrode coordinates and attach to raw
-        raw = _handle_electrodes_reading(electrodes_fname, coord_frame, raw,
-                                         verbose)
+            raise RuntimeError(f"BIDS mandates that the coordsystem.json "
+                               f"should exist if electrodes.tsv does. "
+                               f"Please create coordsystem.json for"
+                               f"{bids_path.basename}")
+        if datatype in ['meg', 'eeg', 'ieeg']:
+            raw = _read_dig_bids(electrodes_fname, coordsystem_fname,
+                                 raw, datatype, verbose)
 
     # Try to find an associated sidecar.json to get information about the
     # recording snapshot
-    sidecar_fname = _find_matching_sidecar(bids_fname, bids_root,
-                                           '{}.json'.format(kind),
+    sidecar_fname = _find_matching_sidecar(bids_path,
+                                           suffix=datatype,
+                                           extension='.json',
                                            allow_fail=True)
     if sidecar_fname is not None:
         raw = _handle_info_reading(sidecar_fname, raw, verbose=verbose)
 
     # read in associated subject info from participants.tsv
     participants_tsv_fpath = op.join(bids_root, 'participants.tsv')
-    subject = "sub-" + params['sub']
+    subject = f"sub-{bids_path.subject}"
     if op.exists(participants_tsv_fpath):
         raw = _handle_participants_reading(participants_tsv_fpath, raw,
                                            subject, verbose=verbose)
@@ -453,54 +412,7 @@ def read_raw_bids(bids_fname, bids_root, extra_params=None,
     return raw
 
 
-def get_matched_empty_room(bids_fname, bids_root):
-    """Get matching empty room file.
-
-    Parameters
-    ----------
-    bids_fname : str
-        The filename for which to find the matching empty room file.
-    bids_root : str | pathlib.Path
-        Path to the BIDS root folder.
-
-    Returns
-    -------
-    er_fname : str | None.
-        The filename corresponding to the empty room.
-        Returns None if no file found.
-    """
-    bids_fname = op.basename(bids_fname)
-    _, ext = _parse_ext(bids_fname)
-
-    raw = read_raw_bids(bids_fname, bids_root)
-    if raw.info['meas_date'] is None:
-        raise ValueError('Measurement date not available. Cannot get matching'
-                         ' empty room file')
-
-    ref_date = raw.info['meas_date']
-    if not isinstance(ref_date, datetime):
-        # for MNE < v0.20
-        ref_date = datetime.fromtimestamp(raw.info['meas_date'][0])
-    search_path = make_bids_folders(bids_root=bids_root, subject='emptyroom',
-                                    session='**', make_dir=False)
-    search_path = op.join(search_path, '**', '**%s' % ext)
-    er_fnames = glob.glob(search_path)
-
-    best_er_fname = None
-    min_seconds = np.inf
-    for er_fname in er_fnames:
-        params = _parse_bids_filename(er_fname, verbose=False)
-        dt = datetime.strptime(params['ses'], '%Y%m%d')
-        dt = dt.replace(tzinfo=ref_date.tzinfo)
-        delta_t = dt - ref_date
-        if abs(delta_t.total_seconds()) < min_seconds:
-            min_seconds = abs(delta_t.total_seconds())
-            best_er_fname = er_fname
-
-    return best_er_fname
-
-
-def get_head_mri_trans(bids_fname, bids_root):
+def get_head_mri_trans(bids_path):
     """Produce transformation matrix from MEG and MRI landmark points.
 
     Will attempt to read the landmarks of Nasion, LPA, and RPA from the sidecar
@@ -510,10 +422,10 @@ def get_head_mri_trans(bids_fname, bids_root):
 
     Parameters
     ----------
-    bids_fname : str
-        Full name of the MEG data file
-    bids_root : str | pathlib.Path
-        Path to root of the BIDS folder
+    bids_path : BIDSPath
+        The path of the recording for which to retrieve the transformation. The
+        :class:`mne_bids.BIDSPath` instance passed here **must** have the
+        ``.root`` attribute set.
 
     Returns
     -------
@@ -525,9 +437,23 @@ def get_head_mri_trans(bids_fname, bids_root):
         raise ImportError('This function requires nibabel.')
     import nibabel as nib
 
+    if not isinstance(bids_path, BIDSPath):
+        raise RuntimeError('"bids_path" must be a BIDSPath object. Please '
+                           'instantiate using mne_bids.BIDSPath().')
+
+    # check root available
+    bids_root = bids_path.root
+    if bids_root is None:
+        raise ValueError('The root of the "bids_path" must be set. '
+                         'Please use `bids_path.update(root="<root>")` '
+                         'to set the root of the BIDS folder to read.')
+    # only get this for MEG data
+    bids_path.update(datatype='meg')
+
     # Get the sidecar file for MRI landmarks
-    bids_fname = op.basename(bids_fname)
-    t1w_json_path = _find_matching_sidecar(bids_fname, bids_root, 'T1w.json')
+    bids_fname = bids_path.update(suffix='meg', root=bids_root)
+    t1w_json_path = _find_matching_sidecar(bids_fname, suffix='T1w',
+                                           extension='.json')
 
     # Get MRI landmarks from the JSON sidecar
     with open(t1w_json_path, 'r') as f:
@@ -569,7 +495,7 @@ def get_head_mri_trans(bids_fname, bids_root):
     if ext == '.fif':
         extra_params = dict(allow_maxshield=True)
 
-    raw = read_raw_bids(bids_fname, bids_root, extra_params=extra_params)
+    raw = read_raw_bids(bids_path=bids_path, extra_params=extra_params)
     meg_coords_dict = _extract_landmarks(raw.info['dig'])
     meg_landmarks = np.asarray((meg_coords_dict['LPA'],
                                 meg_coords_dict['NAS'],
