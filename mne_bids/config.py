@@ -7,7 +7,7 @@ BIDS_VERSION = "1.4.0"
 
 DOI = """https://doi.org/10.21105/joss.01896"""
 
-ALLOWED_DATATYPES = ['meg', 'eeg', 'ieeg', 'anat', 'beh']
+ALLOWED_DATATYPES = ['meg', 'eeg', 'ieeg', 'anat', 'beh', 'nirs']
 
 # Orientation of the coordinate system dependent on manufacturer
 ORIENTATION = {'.sqd': 'ALS', '.con': 'ALS', '.fif': 'RAS', '.pdf': 'ALS',
@@ -61,7 +61,7 @@ allowed_extensions_ieeg = ['.vhdr',  # BrainVision, accompanied by .vmrk, .eeg
                            '.nwb',  # Neurodata without borders
                            ]
 
-allowed_extensions_nirs = ['.nirx',  # NIRX
+allowed_extensions_nirs = ['.snirf',  # NIRX
                            ]
 
 ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,
@@ -72,7 +72,7 @@ ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,
 # allowed suffixes (i.e. last "_" delimiter in the BIDS filenames before
 # the extension)
 ALLOWED_FILENAME_SUFFIX = [
-    'meg', 'markers', 'eeg', 'ieeg', 'T1w',  # datatype
+    'meg', 'markers', 'eeg', 'ieeg', 'T1w', 'nirs',  # datatype
     'participants', 'scans',
     'electrodes', 'channels', 'coordsystem', 'events',  # sidecars
     'headshape', 'digitizer',  # meg-specific sidecars
@@ -90,6 +90,7 @@ ALLOWED_FILENAME_EXTENSIONS = (
     allowed_extensions_meg +
     allowed_extensions_eeg +
     allowed_extensions_ieeg +
+    allowed_extensions_nirs +
     ['.json', '.tsv', '.tsv.gz', '.nii', '.nii.gz'] +
     ['.pos', '.eeg', '.vmrk']  # extra datatype-specific metadata files
 )
