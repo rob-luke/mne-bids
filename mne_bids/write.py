@@ -8,6 +8,7 @@
 #
 # License: BSD (3-clause)
 import json
+import re
 import os
 import os.path as op
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ except ImportError:
 from mne.channels.channels import _unit2human
 from mne.utils import check_version, has_nibabel, logger, warn
 from mne.io.nirx.nirx import RawNIRX
+
+from mne.io.pick import _picks_to_idx
 
 
 from mne_bids.pick import coil_type
@@ -136,6 +139,28 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
         ('status_description', status_description)
     ])
     ch_data = _drop(ch_data, ignored_channels, 'name')
+
+    # TODO: massive hack. step 1, get working. step 2, make nice.
+    if 'fnirs_cw_amplitude' in raw:
+        ch_data["wavelength"] = [raw.info["chs"][i]["loc"][9] for i in range(len(raw.ch_names))]
+
+        picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
+
+        sources = np.zeros(picks.shape)
+        detectors = np.zeros(picks.shape)
+        for ii in picks:
+            ch1_name_info = re.match(r'S(\d+)_D(\d+) (\d+)',
+                                     raw.info['chs'][ii]['ch_name'])
+            sources[ii] = ch1_name_info.groups()[0]
+            detectors[ii] = ch1_name_info.groups()[1]
+        ch_data["source"] = sources
+        ch_data["detector"] = detectors
+        ch_data.move_to_end('wavelength', last=False)
+        ch_data.move_to_end('detector', last=False)
+        ch_data.move_to_end('source', last=False)
+        ch_data.move_to_end('type', last=False)
+        ch_data.move_to_end('name', last=False)
+        ch_data["data"] = np.full((n_channels), "101: Continuous wave amplitude")
 
     _write_tsv(fname, ch_data, overwrite, verbose)
 
@@ -1149,8 +1174,6 @@ def write_raw_bids(raw, bids_path, events_data=None,
         copyfile_kit(raw_fname, bids_path.fpath, bids_path.subject,
                      bids_path.session, bids_path.task, bids_path.run,
                      raw._init_kwargs)
-    elif ext == '.snirf':
-        print("TODO: what to do here?")
     else:
         sh.copyfile(raw_fname, bids_path)
 
