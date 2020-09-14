@@ -1155,7 +1155,7 @@ def write_raw_bids(raw, bids_path, events_data=None,
         _coordsystem_json(raw, unit, orient, manufacturer,
                           coordsystem_path.fpath, bids_path.datatype,
                           overwrite, verbose)
-    elif bids_path.datatype in ['eeg', 'ieeg']:
+    elif bids_path.datatype in ['eeg', 'ieeg', 'nirs']:
         # We only write electrodes.tsv and accompanying coordsystem.json
         # if we have an available DigMontage
         if raw.info['dig'] is not None and raw.info['dig']:

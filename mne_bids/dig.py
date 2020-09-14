@@ -286,6 +286,12 @@ def _coordsystem_json(raw, unit, orient, coordsystem_name, fname,
             'iEEGCoordinateSystemDescription': coordsystem_desc,
             'iEEGCoordinateUnits': unit,  # m (MNE), mm, cm , or pixels
         }
+    elif datatype == "nirs":
+        fid_json = {
+            'NIRSCoordinateSystem': coordsystem_name,  # (Other, Pixels, ACPC)
+            'NIRSCoordinateSystemDescription': coordsystem_desc,
+            'NIRSCoordinateUnits': unit,  # m (MNE), mm, cm , or pixels
+        }
 
     _write_json(fname, fid_json, overwrite, verbose)
 
@@ -368,7 +374,7 @@ def _write_dig_bids(electrodes_path, coordsystem_path, root,
             warn("Coordinate frame of iEEG coords missing/unknown "
                  "for {}. Skipping reading "
                  "in of montage...".format(electrodes_path))
-    elif datatype == 'eeg':
+    elif datatype in ['eeg', 'nirs']:
         # We only write EEG electrodes.tsv and coordsystem.json
         # if we have LPA, RPA, and NAS available to rescale to a known
         # coordinate system frame
@@ -379,8 +385,9 @@ def _write_dig_bids(electrodes_path, coordsystem_path, root,
         # mne-python automatically converts unknown coord frame to head
         if coord_frame_int == FIFF.FIFFV_COORD_HEAD and landmarks:
             # Now write the data
-            _electrodes_tsv(raw, electrodes_path, datatype,
-                            overwrite, verbose)
+            if datatype == 'eeg':
+                _electrodes_tsv(raw, electrodes_path, datatype,
+                                overwrite, verbose)
             _coordsystem_json(raw, 'm', 'RAS', 'CapTrak',
                               coordsystem_path, datatype,
                               overwrite, verbose)
