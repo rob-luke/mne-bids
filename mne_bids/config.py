@@ -77,7 +77,7 @@ ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,
 ALLOWED_FILENAME_SUFFIX = [
     'meg', 'markers', 'eeg', 'ieeg', 'T1w', 'nirs',  # datatype
     'participants', 'scans',
-    'electrodes', 'channels', 'coordsystem', 'events',  # sidecars
+    'electrodes', 'channels', 'coordsystem', 'events', 'optodes',  # sidecars
     'headshape', 'digitizer',  # meg-specific sidecars
     'behav', 'phsyio', 'stim'  # behavioral
 ]

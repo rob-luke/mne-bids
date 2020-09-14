@@ -59,6 +59,61 @@ def _is_numeric(n):
     return isinstance(n, (np.integer, np.floating, int, float))
 
 
+def _optodes_tsv(raw, fname, overwrite=False, verbose=True):
+    """Create a optodes.tsv file and save it.
+
+    Parameters
+    ----------
+    raw : instance of Raw
+        The data as MNE-Python Raw object.
+    fname : str | BIDSPath
+        Filename to save the optodes.tsv to.
+    overwrite : bool
+        Whether to overwrite the existing file.
+        Defaults to False.
+    verbose : bool
+        Set verbose output to True or False.
+
+    """
+    picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
+    sources = np.zeros(picks.shape)
+    detectors = np.zeros(picks.shape)
+    for ii in picks:
+        ch1_name_info = re.match(r'S(\d+)_D(\d+) (\d+)',
+                                 raw.info['chs'][ii]['ch_name'])
+        sources[ii] = ch1_name_info.groups()[0]
+        detectors[ii] = ch1_name_info.groups()[1]
+    unique_sources = np.unique(sources)
+    n_sources = len(unique_sources)
+    unique_detectors = np.unique(detectors)
+    names = np.concatenate((unique_sources, unique_detectors))
+
+    xs = np.zeros(names.shape)
+    ys = np.zeros(names.shape)
+    zs = np.zeros(names.shape)
+    for i, source in enumerate(unique_sources):
+        s_idx = np.where(sources == source)[0][0]
+        xs[i] = raw.info["chs"][s_idx]["loc"][3]
+        ys[i] = raw.info["chs"][s_idx]["loc"][4]
+        zs[i] = raw.info["chs"][s_idx]["loc"][5]
+    for i, detector in enumerate(unique_detectors):
+        d_idx = np.where(detectors == detector)[0][0]
+        xs[i + n_sources] = raw.info["chs"][d_idx]["loc"][6]
+        ys[i + n_sources] = raw.info["chs"][d_idx]["loc"][7]
+        zs[i + n_sources] = raw.info["chs"][d_idx]["loc"][8]
+
+    ch_data = OrderedDict([
+        ('name', names),
+        ('x', xs),
+        ('y', ys),
+        ('z', zs),
+        ('type', np.concatenate((np.full(len(unique_sources), 'source'),
+                                 np.full(len(unique_detectors), 'detector')))),
+    ])
+
+    _write_tsv(fname, ch_data, overwrite, verbose)
+
+
 def _channels_tsv(raw, fname, overwrite=False, verbose=True):
     """Create a channels.tsv file and save it.
 
@@ -1061,7 +1116,8 @@ def write_raw_bids(raw, bids_path, events_data=None,
     events_path = bids_path.copy().update(suffix='events', extension='.tsv')
     channels_path = bids_path.copy().update(
         suffix='channels', extension='.tsv')
-
+    optodes_path = bids_path.copy().update(
+        suffix='optodes', extension='.tsv')
     # Anonymize
     convert = False
     if anonymize is not None:
@@ -1122,6 +1178,9 @@ def write_raw_bids(raw, bids_path, events_data=None,
     _sidecar_json(raw, bids_path.task, manufacturer, sidecar_path.fpath,
                   bids_path.datatype, overwrite, verbose)
     _channels_tsv(raw, channels_path.fpath, overwrite, verbose)
+    _optodes_tsv(raw, optodes_path.fpath, overwrite, verbose)
+
+
 
     # create parent directories if needed
     _mkdir_p(os.path.dirname(data_path))
