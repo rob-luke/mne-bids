@@ -86,7 +86,7 @@ def _optodes_tsv(raw, fname, overwrite=False, verbose=True):
     unique_sources = np.unique(sources)
     n_sources = len(unique_sources)
     unique_detectors = np.unique(detectors)
-    names = np.concatenate((unique_sources, unique_detectors))
+    names = np.concatenate((unique_sources, unique_detectors)).astype(int)
 
     xs = np.zeros(names.shape)
     ys = np.zeros(names.shape)
@@ -208,8 +208,8 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
                                      raw.info['chs'][ii]['ch_name'])
             sources[ii] = ch1_name_info.groups()[0]
             detectors[ii] = ch1_name_info.groups()[1]
-        ch_data["source"] = sources
-        ch_data["detector"] = detectors
+        ch_data["source"] = sources.astype(int)
+        ch_data["detector"] = detectors.astype(int)
         ch_data.move_to_end('wavelength', last=False)
         ch_data.move_to_end('detector', last=False)
         ch_data.move_to_end('source', last=False)
