@@ -408,7 +408,7 @@ def _read_dig_bids(electrodes_fpath, coordsystem_fpath,
     Parameters
     ----------
     electrodes_fpath : str
-        Filepath of the electrodes.tsv to read.
+        Filepath of the electrodes.tsv to read.git s
     coordsystem_fpath : str
         Filepath of the coordsystem.json to read.
     raw : instance of Raw

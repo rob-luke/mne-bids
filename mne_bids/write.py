@@ -86,7 +86,9 @@ def _optodes_tsv(raw, fname, overwrite=False, verbose=True):
     unique_sources = np.unique(sources)
     n_sources = len(unique_sources)
     unique_detectors = np.unique(detectors)
-    names = np.concatenate((unique_sources, unique_detectors)).astype(int)
+    names = np.concatenate((
+        ["S" + str(s) for s in unique_sources.astype(int)],
+        ["D" + str(d) for d in unique_detectors.astype(int)]))
 
     xs = np.zeros(names.shape)
     ys = np.zeros(names.shape)
@@ -201,21 +203,22 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
 
         picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
 
-        sources = np.zeros(picks.shape)
-        detectors = np.zeros(picks.shape)
+        sources = np.empty(picks.shape, dtype="<U20")
+        detectors = np.empty(picks.shape, dtype="<U20")
         for ii in picks:
             ch1_name_info = re.match(r'S(\d+)_D(\d+) (\d+)',
+
+
                                      raw.info['chs'][ii]['ch_name'])
-            sources[ii] = ch1_name_info.groups()[0]
-            detectors[ii] = ch1_name_info.groups()[1]
-        ch_data["source"] = sources.astype(int)
-        ch_data["detector"] = detectors.astype(int)
+            sources[ii] = "S" + str(ch1_name_info.groups()[0])
+            detectors[ii] = "D" + str(ch1_name_info.groups()[1])
+        ch_data["source"] = sources
+        ch_data["detector"] = detectors
         ch_data.move_to_end('wavelength', last=False)
         ch_data.move_to_end('detector', last=False)
         ch_data.move_to_end('source', last=False)
         ch_data.move_to_end('type', last=False)
         ch_data.move_to_end('name', last=False)
-        ch_data["data"] = np.full((n_channels), "101: Continuous wave amplitude")
 
     _write_tsv(fname, ch_data, overwrite, verbose)
 

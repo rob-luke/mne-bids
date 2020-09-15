@@ -66,7 +66,7 @@ def _get_ch_type_mapping(fro='mne', to='bids'):
     if fro == 'mne' and to == 'bids':
         mapping = dict(eeg='EEG', misc='MISC', stim='TRIG', emg='EMG',
                        ecog='ECOG', seeg='SEEG', eog='EOG', ecg='ECG',
-                       resp='RESP', fnirs_cw_amplitude='NIRS',
+                       resp='RESP', fnirs_cw_amplitude='NIRSCW',
                        # MEG channels
                        meggradaxial='MEGGRADAXIAL', megmag='MEGMAG',
                        megrefgradaxial='MEGREFGRADAXIAL',
