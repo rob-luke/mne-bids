@@ -2,6 +2,20 @@
 from mne import io
 from mne.io.constants import FIFF
 
+try:
+    from mne.io import read_raw_persyst
+except ImportError:
+    read_raw_persyst = None
+
+
+def _read_raw_persyst_func():
+    if read_raw_persyst is None:
+        print('Reading Persyst files requires latest mne dev '
+              'version or 0.21 release.')
+        return None
+    else:
+        return read_raw_persyst
+
 
 BIDS_VERSION = "1.4.0"
 
@@ -21,11 +35,13 @@ meg_manufacturers = {'.sqd': 'KIT/Yokogawa', '.con': 'KIT/Yokogawa',
 
 eeg_manufacturers = {'.vhdr': 'BrainProducts', '.eeg': 'BrainProducts',
                      '.edf': 'n/a', '.bdf': 'Biosemi', '.set': 'n/a',
-                     '.fdt': 'n/a'}
+                     '.fdt': 'n/a',
+                     '.lay': 'Persyst', '.dat': 'Persyst'}
 
 ieeg_manufacturers = {'.vhdr': 'BrainProducts', '.eeg': 'BrainProducts',
                       '.edf': 'n/a', '.set': 'n/a', '.fdt': 'n/a',
-                      '.mef': 'n/a', '.nwb': 'n/a'}
+                      '.mef': 'n/a', '.nwb': 'n/a',
+                      '.lay': 'Persyst', '.dat': 'Persyst'}
 
 nirs_manufacturers = {'.snirf': 'SNIRF'}
 
@@ -34,7 +50,8 @@ reader = {'.con': io.read_raw_kit, '.sqd': io.read_raw_kit,
           '.fif': io.read_raw_fif, '.pdf': io.read_raw_bti,
           '.ds': io.read_raw_ctf, '.vhdr': io.read_raw_brainvision,
           '.edf': io.read_raw_edf, '.bdf': io.read_raw_bdf,
-          '.set': io.read_raw_eeglab, '.snirf': io.read_raw_snirf}
+          '.set': io.read_raw_eeglab, '.snirf': io.read_raw_snirf,
+          '.lay': _read_raw_persyst_func()}
 
 # Merge the manufacturer dictionaries in a python2 / python3 compatible way
 MANUFACTURERS = dict()
@@ -67,10 +84,18 @@ allowed_extensions_ieeg = ['.vhdr',  # BrainVision, accompanied by .vmrk, .eeg
 allowed_extensions_nirs = ['.snirf',  # SNIRF
                            ]
 
+# allowed extensions (data formats) in BIDS spec
 ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,
                                'eeg': allowed_extensions_eeg,
                                'ieeg': allowed_extensions_ieeg,
                                'nirs': allowed_extensions_nirs}
+
+# allow additional extensions that are not BIDS
+# compliant, but we will convert to the
+# recommended formats
+ALLOWED_INPUT_EXTENSIONS = \
+    allowed_extensions_meg + allowed_extensions_eeg + \
+    allowed_extensions_ieeg + allowed_extensions_nirs + ['.lay']
 
 # allowed suffixes (i.e. last "_" delimiter in the BIDS filenames before
 # the extension)
@@ -94,6 +119,7 @@ ALLOWED_FILENAME_EXTENSIONS = (
     allowed_extensions_eeg +
     allowed_extensions_ieeg +
     allowed_extensions_nirs +
+    ALLOWED_INPUT_EXTENSIONS +
     ['.json', '.tsv', '.tsv.gz', '.nii', '.nii.gz'] +
     ['.pos', '.eeg', '.vmrk']  # extra datatype-specific metadata files
 )

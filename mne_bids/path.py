@@ -245,7 +245,7 @@ class BIDSPath(object):
     >>> # result in a wildcard at the datatype directory level
     >>> print(new_bids_path)
     sub-test2/ses-one/*/sub-test2_ses-one_task-mytask_channels.tsv
-    >>> # set a bids_root
+    >>> # set a root for the BIDS dataset
     >>> new_bids_path.update(root='/bids_dataset')
     >>> print(new_bids_path.root)
     /bids_dataset
@@ -330,7 +330,7 @@ class BIDSPath(object):
             The path of the BIDS directory.
         """
         # Create the data path based on the available entities:
-        # bids_root, subject, session, and datatype
+        # root, subject, session, and datatype
         data_path = '' if self.root is None else self.root
         if self.subject is not None:
             data_path = op.join(data_path, f'sub-{self.subject}')
@@ -396,7 +396,7 @@ class BIDSPath(object):
         """Full filepath for this BIDS file.
 
         Getting the file path consists of the entities passed in
-        and will get the relative (or full if ``bids_root`` is passed)
+        and will get the relative (or full if ``root`` is passed)
         path.
 
         Returns
@@ -415,7 +415,7 @@ class BIDSPath(object):
             bids_fpath = op.join(data_path,
                                  op.splitext(self.basename)[0])
         else:
-            # if suffix and/or extension is missing, and bids_root is
+            # if suffix and/or extension is missing, and root is
             # not None, then BIDSPath will infer the dataset
             # else, return the relative path with the basename
             if (self.suffix is None or self.extension is None) and \
@@ -674,7 +674,7 @@ def _get_matching_bidspaths_from_filesystem(bids_path):
     basename, bids_root = bids_path.basename, bids_path.root
 
     if datatype is None:
-        datatype = _infer_datatype(bids_root=bids_root,
+        datatype = _infer_datatype(root=bids_root,
                                    sub=sub, ses=ses)
 
     data_dir = BIDSPath(subject=sub, session=ses, datatype=datatype,
@@ -734,15 +734,22 @@ def print_dir_tree(folder, max_depth=None):
     max_depth += 1
 
     # Base length of a tree branch, to normalize each tree's start to 0
-    baselen = len(folder.split(os.sep)) - 1
+    baselen = len(str(folder).split(os.sep)) - 1
 
     # Recursively walk through all directories
-    for root, dirs, files in os.walk(folder):
+    for root, dirs, files in os.walk(folder, topdown=True):
+        # Since we're using `topdown=True`, sorting `dirs` ensures that
+        # `os.walk` will continue walking through directories in alphabetical
+        # order. So although we're not actually using `dirs` anywhere below,
+        # sorting it here is imperative to ensure the correct (alphabetical)
+        # directory sort order in the output.
+        dirs.sort()
+        files.sort()
 
         # Check how far we have walked
         branchlen = len(root.split(os.sep)) - baselen
 
-        # Only print, if this is up to the depth we asked
+        # Only print if this is up to the depth we asked
         if branchlen <= max_depth:
             if branchlen <= 1:
                 print('|{}'.format(op.basename(root) + os.sep))
@@ -834,7 +841,7 @@ def get_entities_from_fname(fname):
 
 
 def _find_matching_sidecar(bids_path, suffix=None,
-                           extension=None, allow_fail=False):
+                           extension=None, on_fail='raise'):
     """Try to find a sidecar file with a given suffix for a data file.
 
     Parameters
@@ -846,17 +853,23 @@ def _find_matching_sidecar(bids_path, suffix=None,
         before the extension. E.g., ``'ieeg'``.
     extension : str | None
         The extension of the filename. E.g., ``'.json'``.
-    allow_fail : bool
-        If False, will raise RuntimeError if not exactly one matching sidecar
-        was found. If True, will return None in that case. Defaults to False
+    on_fail : 'raise' | 'warn' | 'ignore'
+        If no matching sidecar file was found and this is set to ``'raise'``,
+        raise a ``RuntimeError``. If ``'warn'``, emit a warning, and if
+        ``'ignore'``, neither raise an exception nor a warning, and return
+        ``None`` in both cases.
 
     Returns
     -------
     sidecar_fname : str | None
-        Path to the identified sidecar file, or None, if `allow_fail` is True
-        and no sidecar_fname was found
+        Path to the identified sidecar file, or ``None`` if none could be found
+        and ``on_fail`` was set to ``'warn'`` or ``'ignore'``.
 
     """
+    if on_fail not in ('warn', 'raise', 'ignore'):
+        raise ValueError(f'Acceptable values for on_fail are: warn, raise, '
+                         f'ignore, but got: {on_fail}')
+
     bids_root = bids_path.root
 
     # search suffix is BIDS-suffix and extension
@@ -906,11 +919,12 @@ def _find_matching_sidecar(bids_path, suffix=None,
                f'associated with {bids_path.basename}, '
                f'but found {len(candidate_list)}: "{candidate_list}".')
     msg += '\n\nThe search_str was "{}"'.format(search_str)
-    if allow_fail:
-        warn(msg)
-        return None
-    else:
+    if on_fail == 'raise':
         raise RuntimeError(msg)
+    elif on_fail == 'warn':
+        warn(msg)
+
+    return None
 
 
 def _get_bids_suffix_and_ext(str_suffix):
@@ -926,19 +940,19 @@ def _get_bids_suffix_and_ext(str_suffix):
     return suffix, ext
 
 
-def get_datatypes(bids_root):
+def get_datatypes(root):
     """Get list of data types ("modalities") present in a BIDS dataset.
 
     Parameters
     ----------
-    bids_root : str | pathlib.Path
+    root : str | pathlib.Path
         Path to the root of the BIDS directory.
 
     Returns
     -------
     modalities : list of str
         List of the data types present in the BIDS dataset pointed to by
-        `bids_root`.
+        `root`.
 
     """
     # Take all possible data types from "entity" table
@@ -947,7 +961,7 @@ def get_datatypes(bids_root):
     datatype_list = ('anat', 'func', 'dwi', 'fmap', 'beh',
                      'meg', 'eeg', 'ieeg')
     datatypes = list()
-    for root, dirs, files in os.walk(bids_root):
+    for root, dirs, files in os.walk(root):
         for dir in dirs:
             if dir in datatype_list and dir not in datatypes:
                 datatypes.append(dir)
@@ -955,7 +969,7 @@ def get_datatypes(bids_root):
     return datatypes
 
 
-def get_entity_vals(bids_root, entity_key, *, ignore_subjects='emptyroom',
+def get_entity_vals(root, entity_key, *, ignore_subjects='emptyroom',
                     ignore_sessions=None, ignore_tasks=None, ignore_runs=None,
                     ignore_processings=None, ignore_spaces=None,
                     ignore_acquisitions=None, ignore_splits=None,
@@ -968,7 +982,7 @@ def get_entity_vals(bids_root, entity_key, *, ignore_subjects='emptyroom',
 
     Parameters
     ----------
-    bids_root : str | pathlib.Path
+    root : str | pathlib.Path
         Path to the root of the BIDS directory.
     entity_key : str
         The name of the entity key to search for.
@@ -996,19 +1010,19 @@ def get_entity_vals(bids_root, entity_key, *, ignore_subjects='emptyroom',
     -------
     entity_vals : list of str
         List of the values associated with an `entity_key` in the BIDS dataset
-        pointed to by `bids_root`.
+        pointed to by `root`.
 
     Examples
     --------
-    >>> bids_root = os.path.expanduser('~/mne_data/eeg_matchingpennies')
+    >>> root = os.path.expanduser('~/mne_data/eeg_matchingpennies')
     >>> entity_key = 'sub'
-    >>> get_entity_vals(bids_root, entity_key)
+    >>> get_entity_vals(root, entity_key)
     ['05', '06', '07', '08', '09', '10', '11']
 
     Notes
     -----
-    This function will scan the entire ``bids_root``, except for a
-    ``derivatives`` subfolder placed directly under ``bids_root``.
+    This function will scan the entire ``root``, except for a
+    ``derivatives`` subfolder placed directly under ``root``.
 
     References
     ----------
@@ -1037,11 +1051,11 @@ def get_entity_vals(bids_root, entity_key, *, ignore_subjects='emptyroom',
 
     p = re.compile(r'{}-(.*?)_'.format(entity_long_abbr_map[entity_key]))
     values = list()
-    filenames = (Path(bids_root)
+    filenames = (Path(root)
                  .rglob(f'*{entity_long_abbr_map[entity_key]}-*_*'))
     for filename in filenames:
         # Ignore `derivatives` folder.
-        if str(filename).startswith(op.join(bids_root, 'derivatives')):
+        if str(filename).startswith(op.join(root, 'derivatives')):
             continue
 
         if ignore_subjects and any([filename.stem.startswith(f'sub-{s}_')
@@ -1145,25 +1159,25 @@ def _find_best_candidates(params, candidate_list):
     return best_candidates
 
 
-def _get_datatypes_for_sub(*, bids_root, sub, ses=None):
+def _get_datatypes_for_sub(*, root, sub, ses=None):
     """Retrieve data modalities for a specific subject and session."""
-    subject_dir = op.join(bids_root, f'sub-{sub}')
+    subject_dir = op.join(root, f'sub-{sub}')
     if ses is not None:
         subject_dir = op.join(subject_dir, f'ses-{ses}')
 
     # TODO We do this to ensure we don't accidentally pick up any "spurious"
     # TODO sub-directories. But is that really necessary with valid BIDS data?
-    modalities_in_dataset = get_datatypes(bids_root=bids_root)
+    modalities_in_dataset = get_datatypes(root=root)
     subdirs = [f.name for f in os.scandir(subject_dir) if f.is_dir()]
     available_modalities = [s for s in subdirs if s in modalities_in_dataset]
     return available_modalities
 
 
-def _infer_datatype(*, bids_root, sub, ses):
+def _infer_datatype(*, root, sub, ses):
     # Check which suffix is available for this particular
     # subject & session. If we get no or multiple hits, throw an error.
 
-    modalities = _get_datatypes_for_sub(bids_root=bids_root, sub=sub,
+    modalities = _get_datatypes_for_sub(root=root, sub=sub,
                                         ses=ses)
 
     # We only want to handle electrophysiological data here.

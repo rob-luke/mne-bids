@@ -100,9 +100,9 @@ def test_get_entity_vals(entity, expected_vals, kwargs, return_bids_test_dir):
 
     if entity == 'bogus':
         with pytest.raises(ValueError, match='`key` must be one of'):
-            get_entity_vals(bids_root=bids_root, entity_key=entity, **kwargs)
+            get_entity_vals(root=bids_root, entity_key=entity, **kwargs)
     else:
-        vals = get_entity_vals(bids_root=bids_root, entity_key=entity,
+        vals = get_entity_vals(root=bids_root, entity_key=entity,
                                **kwargs)
         assert vals == expected_vals
 
@@ -137,6 +137,9 @@ def test_print_dir_tree(capsys):
     print_dir_tree(test_dir, max_depth=0)
     captured = capsys.readouterr()
     assert captured.out == '|tests{}\n'.format(os.sep)
+
+    # test if pathlib.Path object
+    print_dir_tree(Path(test_dir))
 
 
 def test_make_folders():
@@ -260,11 +263,29 @@ def test_find_matching_sidecar(return_bids_test_dir):
         _find_matching_sidecar(bids_fpath,
                                suffix='coordsystem', extension='.json')
 
-    # Find nothing but receive None, because we set `allow_fail` to True
+    # Find nothing and raise.
+    with pytest.raises(RuntimeError, match='Did not find any'):
+        fname = _find_matching_sidecar(bids_fpath, suffix='foo',
+                                       extension='.bogus')
+
+    # Find nothing and receive None and a warning.
+    on_fail = 'warn'
     with pytest.warns(RuntimeWarning, match='Did not find any'):
-        _find_matching_sidecar(bids_fpath,
-                               suffix='foo', extension='.bogus',
-                               allow_fail=True)
+        fname = _find_matching_sidecar(bids_fpath, suffix='foo',
+                                       extension='.bogus', on_fail=on_fail)
+    assert fname is None
+
+    # Find nothing and receive None.
+    on_fail = 'ignore'
+    fname = _find_matching_sidecar(bids_fpath, suffix='foo',
+                                   extension='.bogus', on_fail=on_fail)
+    assert fname is None
+
+    # Invalid on_fail.
+    on_fail = 'hello'
+    with pytest.raises(ValueError, match='Acceptable values for on_fail are'):
+        _find_matching_sidecar(bids_fpath, suffix='coordsystem',
+                               extension='.json', on_fail=on_fail)
 
 
 def test_bids_path_inference(return_bids_test_dir):

@@ -52,7 +52,8 @@ from mne_bids.read import _get_bads_from_tsv_data, _find_matching_sidecar
 
 from mne_bids.config import (ORIENTATION, UNITS, MANUFACTURERS,
                              IGNORED_CHANNELS, ALLOWED_DATATYPE_EXTENSIONS,
-                             BIDS_VERSION, REFERENCES, _map_options, reader)
+                             BIDS_VERSION, REFERENCES, _map_options, reader,
+                             ALLOWED_INPUT_EXTENSIONS)
 
 
 def _is_numeric(n):
@@ -1048,14 +1049,10 @@ def write_raw_bids(raw, bids_path, events_data=None,
     # point to file containing header info for multifile systems
     raw_fname = raw_fname.replace('.eeg', '.vhdr')
     raw_fname = raw_fname.replace('.fdt', '.set')
+    raw_fname = raw_fname.replace('.dat', '.lay')
     _, ext = _parse_ext(raw_fname, verbose=verbose)
 
-    if ext in [".pdf"]:  # This is the ext returned for unknown
-        if type(raw) is RawNIRX:
-            ext = ".snirf"
-
-    if ext not in [this_ext for data_type in ALLOWED_DATATYPE_EXTENSIONS
-                   for this_ext in ALLOWED_DATATYPE_EXTENSIONS[data_type]]:
+    if ext not in ALLOWED_INPUT_EXTENSIONS:
         raise ValueError(f'Unrecognized file format {ext}')
 
     raw_orig = reader[ext](**raw._init_kwargs)
@@ -1248,7 +1245,7 @@ def write_raw_bids(raw, bids_path, events_data=None,
     return bids_path
 
 
-def write_anat(bids_root, subject, t1w, session=None, acquisition=None,
+def write_anat(root, subject, t1w, session=None, acquisition=None,
                raw=None, trans=None, landmarks=None, deface=False,
                overwrite=False, verbose=False):
     """Put anatomical MRI data into a BIDS format.
@@ -1260,7 +1257,7 @@ def write_anat(bids_root, subject, t1w, session=None, acquisition=None,
 
     Parameters
     ----------
-    bids_root : str | pathlib.Path
+    root : str | pathlib.Path
         Path to root of the BIDS folder
     subject : str
         Subject label as in 'sub-<label>', for example: '01'
@@ -1326,7 +1323,7 @@ def write_anat(bids_root, subject, t1w, session=None, acquisition=None,
                          'must be provided to deface the T1')
 
     # Make directory for anatomical data
-    anat_dir = op.join(bids_root, 'sub-{}'.format(subject))
+    anat_dir = op.join(root, 'sub-{}'.format(subject))
     # Session is optional
     if session is not None:
         anat_dir = op.join(anat_dir, 'ses-{}'.format(session))
@@ -1361,7 +1358,7 @@ def write_anat(bids_root, subject, t1w, session=None, acquisition=None,
     # this needs to be a string, since nibabel assumes a string input
     t1w_basename = BIDSPath(subject=subject, session=session,
                             acquisition=acquisition,
-                            root=bids_root,
+                            root=root,
                             suffix='T1w', extension='.nii.gz')
 
     # Check if we have necessary conditions for writing a sidecar JSON
@@ -1595,4 +1592,4 @@ def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
     bads = _get_bads_from_tsv_data(tsv_data)
     raw.info['bads'] = bads
     # XXX (How) will this handle split files?
-    raw.save(raw.filenames[0], overwrite=True, verbose=False)
+    # raw.save(raw.filenames[0], overwrite=True, verbose=False)
