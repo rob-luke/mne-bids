@@ -651,7 +651,7 @@ def test_match(return_bids_test_dir):
 
     bids_path_01 = BIDSPath(root=bids_root)
     paths = bids_path_01.match()
-    assert len(paths) == 9
+    assert len(paths) == 11
     assert all('sub-01_ses-01' in p.basename for p in paths)
     assert all([p.root == bids_root for p in paths])
 
