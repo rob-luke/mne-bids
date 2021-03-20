@@ -1382,7 +1382,9 @@ def write_raw_bids(raw, bids_path, events_data=None,
     _sidecar_json(raw, bids_path.task, manufacturer, sidecar_path.fpath,
                   bids_path.datatype, overwrite, verbose)
     _channels_tsv(raw, channels_path.fpath, overwrite, verbose)
-    _optodes_tsv(raw, optodes_path.fpath, overwrite, verbose)
+
+    if bids_path.datatype in ['nirs']:
+        _optodes_tsv(raw, optodes_path.fpath, overwrite, verbose)
 
     # create parent directories if needed
     _mkdir_p(os.path.dirname(data_path))
