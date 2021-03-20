@@ -1361,7 +1361,7 @@ def write_raw_bids(raw, bids_path, events_data=None,
                                 fname=coordsystem_path.fpath,
                                 datatype=bids_path.datatype,
                                 overwrite=overwrite, verbose=verbose)
-elif bids_path.datatype in ['eeg', 'ieeg', 'nirs']:
+    elif bids_path.datatype in ['eeg', 'ieeg', 'nirs']:
         # We only write electrodes.tsv and accompanying coordsystem.json
         # if we have an available DigMontage
         if raw.info['dig'] is not None and raw.info['dig']:
@@ -1833,11 +1833,6 @@ def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
 
     _write_tsv(channels_fname, tsv_data, overwrite=True, verbose=verbose)
 
-    # Update info['bads']
-    bads = _get_bads_from_tsv_data(tsv_data)
-    raw.info['bads'] = bads
-    # XXX (How) will this handle split files?
-    # raw.save(raw.filenames[0], overwrite=True, verbose=False)
 
 def write_meg_calibration(calibration, bids_path, verbose=None):
     """Write the Elekta/Neuromag/MEGIN fine-calibration matrix to disk.
