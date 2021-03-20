@@ -177,7 +177,6 @@ def _write_optodes_tsv(raw, fname, overwrite=False, verbose=True):
     _write_tsv(fname, ch_data, overwrite, verbose)
 
 
-
 def _write_electrodes_tsv(raw, fname, datatype, overwrite=False, verbose=True):
     """Create an electrodes.tsv file and save it.
 
@@ -422,7 +421,7 @@ def _write_dig_bids(bids_path, raw, overwrite=False, verbose=True):
     electrodes_path = BIDSPath(**coord_file_entities, suffix='electrodes',
                                extension='.tsv')
     optodes_path = BIDSPath(**coord_file_entities, suffix='optodes',
-                               extension='.tsv')
+                            extension='.tsv')
     coordsystem_path = BIDSPath(**coord_file_entities, suffix='coordsystem',
                                 extension='.json')
 
@@ -495,7 +494,6 @@ def _write_dig_bids(bids_path, raw, overwrite=False, verbose=True):
                  "Setting montage not possible if anatomical "
                  "landmarks (NAS, LPA, RPA) are missing, "
                  "and coord_frame is not 'head'.")
-
 
 
 def _read_dig_bids(electrodes_fpath, coordsystem_fpath,
