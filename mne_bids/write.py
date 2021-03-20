@@ -127,8 +127,6 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
     # XXX: improve with API to modify the description
     status_description = ['n/a'] * len(status)
 
-    # TODO: Add NIRS source, detector, wavelength
-
     ch_data = OrderedDict([
         ('name', raw.info['ch_names']),
         ('type', ch_type),
@@ -142,7 +140,6 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
     ])
     ch_data = _drop(ch_data, ignored_channels, 'name')
 
-    # TODO: massive hack. step 1, get working. step 2, make nice.
     if 'fnirs_cw_amplitude' in raw:
         ch_data["wavelength_nominal"] = [raw.info["chs"][i]["loc"][9] for i in
                                          range(len(raw.ch_names))]
