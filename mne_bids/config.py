@@ -2,46 +2,61 @@
 from mne import io
 from mne.io.constants import FIFF
 
-try:
-    from mne.io import read_raw_persyst
-except ImportError:
-    read_raw_persyst = None
-
-
-def _read_raw_persyst_func():
-    if read_raw_persyst is None:
-        print('Reading Persyst files requires latest mne dev '
-              'version or 0.21 release.')
-        return None
-    else:
-        return read_raw_persyst
-
 
 BIDS_VERSION = "1.4.0"
 
 DOI = """https://doi.org/10.21105/joss.01896"""
 
-ALLOWED_DATATYPES = ['meg', 'eeg', 'ieeg', 'anat', 'beh', 'nirs']
+EPHY_ALLOWED_DATATYPES = ['meg', 'eeg', 'ieeg', 'nirs']
+
+ALLOWED_DATATYPES = EPHY_ALLOWED_DATATYPES + ['anat', 'beh']
+
+MEG_CONVERT_FORMATS = ['FIF', 'auto']
+EEG_CONVERT_FORMATS = ['BrainVision', 'auto']
+IEEG_CONVERT_FORMATS = ['BrainVision', 'auto']
+CONVERT_FORMATS = {
+    'meg': MEG_CONVERT_FORMATS,
+    'eeg': EEG_CONVERT_FORMATS,
+    'ieeg': IEEG_CONVERT_FORMATS
+}
 
 # Orientation of the coordinate system dependent on manufacturer
-ORIENTATION = {'.sqd': 'ALS', '.con': 'ALS', '.fif': 'RAS', '.pdf': 'ALS',
-               '.ds': 'ALS'}
+ORIENTATION = {
+    '.con': 'KitYokogawa',
+    '.ds': 'CTF',
+    '.fif': 'ElektaNeuromag',
+    '.pdf': '4DBti',
+    '.sqd': 'KitYokogawa',
+}
 
-UNITS = {'.sqd': 'm', '.con': 'm', '.fif': 'm', '.pdf': 'm', '.ds': 'cm'}
+UNITS = {
+    '.con': 'm',
+    '.ds': 'cm',
+    '.fif': 'm',
+    '.pdf': 'm',
+    '.sqd': 'm'
+}
 
-meg_manufacturers = {'.sqd': 'KIT/Yokogawa', '.con': 'KIT/Yokogawa',
-                     '.fif': 'Elekta', '.pdf': '4D Magnes', '.ds': 'CTF',
-                     '.meg4': 'CTF'}
+meg_manufacturers = {
+    '.con': 'KIT/Yokogawa',
+    '.ds': 'CTF',
+    '.fif': 'Elekta',
+    '.meg4': 'CTF',
+    '.pdf': '4D Magnes',
+    '.sqd': 'KIT/Yokogawa'
+}
 
 eeg_manufacturers = {'.vhdr': 'BrainProducts', '.eeg': 'BrainProducts',
                      '.edf': 'n/a', '.bdf': 'Biosemi', '.set': 'n/a',
                      '.fdt': 'n/a',
-                     '.lay': 'Persyst', '.dat': 'Persyst'}
+                     '.lay': 'Persyst', '.dat': 'Persyst',
+                     '.EEG': 'Nihon Kohden'}
 
 ieeg_manufacturers = {'.vhdr': 'BrainProducts', '.eeg': 'BrainProducts',
                       '.edf': 'n/a', '.set': 'n/a', '.fdt': 'n/a',
                       '.mef': 'n/a', '.nwb': 'n/a',
-                      '.lay': 'Persyst', '.dat': 'Persyst'}
+                      '.lay': 'Persyst', '.dat': 'Persyst',
+                      '.EEG': 'Nihon Kohden'}
 
 nirs_manufacturers = {'.snirf': 'SNIRF'}
 
@@ -50,10 +65,14 @@ reader = {'.con': io.read_raw_kit, '.sqd': io.read_raw_kit,
           '.fif': io.read_raw_fif, '.pdf': io.read_raw_bti,
           '.ds': io.read_raw_ctf, '.vhdr': io.read_raw_brainvision,
           '.edf': io.read_raw_edf, '.bdf': io.read_raw_bdf,
-          '.set': io.read_raw_eeglab, '.snirf': io.read_raw_snirf,
-          '.lay': _read_raw_persyst_func()}
+          '.set': io.read_raw_eeglab, '.lay': io.read_raw_persyst,
+          '.EEG': io.read_raw_nihon, '.snirf': io.read_raw_snirf}
+
 
 # Merge the manufacturer dictionaries in a python2 / python3 compatible way
+# MANUFACTURERS dictionary only includes the extension of the input filename
+# that mne-python accepts (e.g. BrainVision has three files, but the reader
+# takes the filename for `.vhdr`)
 MANUFACTURERS = dict()
 MANUFACTURERS.update(meg_manufacturers)
 MANUFACTURERS.update(eeg_manufacturers)
@@ -95,16 +114,16 @@ ALLOWED_DATATYPE_EXTENSIONS = {'meg': allowed_extensions_meg,
 # recommended formats
 ALLOWED_INPUT_EXTENSIONS = \
     allowed_extensions_meg + allowed_extensions_eeg + \
-    allowed_extensions_ieeg + allowed_extensions_nirs + ['.lay']
+    allowed_extensions_ieeg + allowed_extensions_nirs + ['.lay', '.EEG']
 
 # allowed suffixes (i.e. last "_" delimiter in the BIDS filenames before
 # the extension)
 ALLOWED_FILENAME_SUFFIX = [
-    'meg', 'markers', 'eeg', 'ieeg', 'T1w', 'nirs',  # datatype
+    'meg', 'markers', 'eeg', 'ieeg', 'T1w', 'FLASH', 'nirs',  # datatype
     'participants', 'scans',
     'electrodes', 'channels', 'coordsystem', 'events', 'optodes',  # sidecars
     'headshape', 'digitizer',  # meg-specific sidecars
-    'behav', 'phsyio', 'stim'  # behavioral
+    'beh', 'physio', 'stim'  # behavioral
 ]
 
 # converts suffix to known path modalities
@@ -121,7 +140,8 @@ ALLOWED_FILENAME_EXTENSIONS = (
     allowed_extensions_nirs +
     ALLOWED_INPUT_EXTENSIONS +
     ['.json', '.tsv', '.tsv.gz', '.nii', '.nii.gz'] +
-    ['.pos', '.eeg', '.vmrk']  # extra datatype-specific metadata files
+    ['.pos', '.eeg', '.vmrk'] +  # extra datatype-specific metadata files.
+    ['.dat', '.EEG']  # extra eeg extensions
 )
 
 # allowed BIDS path entities
@@ -134,6 +154,63 @@ ALLOWED_PATH_ENTITIES_SHORT = {'sub': 'subject', 'ses': 'session',
                                'run': 'run', 'proc': 'processing',
                                'space': 'space', 'rec': 'recording',
                                'split': 'split', 'suffix': 'suffix'}
+
+coordsys_standard_template = [
+    'ICBM452AirSpace',
+    'ICBM452Warp5Space',
+    'IXI549Space',
+    'fsaverage',
+    'fsaverageSym',
+    'fsLR',
+    'MNIColin27',
+    'MNI152Lin',
+    'MNI152NLin2009aSym',
+    'MNI152NLin2009bSym',
+    'MNI152NLin2009cSym',
+    'MNI152NLin2009aAsym',
+    'MNI152NLin2009bAsym',
+    'MNI152NLin2009cAsym',
+    'MNI152NLin6Sym',
+    'MNI152NLin6ASym',
+    'MNI305',
+    'NIHPD',
+    'OASIS30AntsOASISAnts',
+    'OASIS30Atropos',
+    'Talairach',
+    'UNCInfant',
+]
+
+coordsys_standard_template_deprecated = [
+    'fsaverage3',
+    'fsaverage4',
+    'fsaverage5',
+    'fsaverage6',
+    'fsaveragesym',
+    'UNCInfant0V21',
+    'UNCInfant1V21',
+    'UNCInfant2V21',
+    'UNCInfant0V22',
+    'UNCInfant1V22',
+    'UNCInfant2V22',
+    'UNCInfant0V23',
+    'UNCInfant1V23',
+    'UNCInfant2V23',
+]
+
+coordsys_meg = ['CTF', 'ElektaNeuromag', '4DBti', 'KitYokogawa', 'ChietiItab']
+coordsys_eeg = ['CapTrak']
+coordsys_ieeg = ['Pixels', 'ACPC']
+coordsys_wildcard = ['Other']
+coordsys_shared = (coordsys_standard_template +
+                   coordsys_standard_template_deprecated +
+                   coordsys_wildcard)
+
+ALLOWED_SPACES = dict()
+ALLOWED_SPACES['meg'] = coordsys_shared + coordsys_meg + coordsys_eeg
+ALLOWED_SPACES['eeg'] = coordsys_shared + coordsys_meg + coordsys_eeg
+ALLOWED_SPACES['ieeg'] = coordsys_shared + coordsys_ieeg
+ALLOWED_SPACES['anat'] = None
+ALLOWED_SPACES['beh'] = None
 
 # See: https://bids-specification.readthedocs.io/en/latest/99-appendices/04-entity-table.html#encephalography-eeg-ieeg-and-meg  # noqa
 ENTITY_VALUE_TYPE = {
@@ -152,32 +229,42 @@ ENTITY_VALUE_TYPE = {
 
 # accepted BIDS formats, which may be subject to change
 # depending on the specification
-BIDS_IEEG_COORDINATE_FRAMES = ['acpc', 'pixels', 'other']
-BIDS_MEG_COORDINATE_FRAMES = ['ctf', 'elektaneuromag',
-                              '4dbti', 'kityokogawa',
-                              'chietiitab', 'other']
-BIDS_EEG_COORDINATE_FRAMES = ['captrak']
+BIDS_IEEG_COORDINATE_FRAMES = ['ACPC', 'Pixels', 'Other']
+BIDS_MEG_COORDINATE_FRAMES = ['CTF', 'ElektaNeuromag',
+                              '4DBti', 'KitYokogawa',
+                              'ChietiItab', 'Other']
+BIDS_EEG_COORDINATE_FRAMES = ['CapTrak']
 
 # accepted coordinate SI units
 BIDS_COORDINATE_UNITS = ['m', 'cm', 'mm']
 
-# mapping from BIDs coordinate frames -> MNE
+# mapping from supported BIDs coordinate frames -> MNE
 BIDS_TO_MNE_FRAMES = {
-    'ctf': 'ctf_head',
-    '4dbti': 'ctf_head',
-    'kityokogawa': 'ctf_head',
-    'elektaneuromag': 'head',
-    'chietiitab': 'head',
-    'captrak': 'head',
-    'acpc': 'ras',
-    'mni': 'mni_tal',
-    'fs': 'fs_tal',
-    'ras': 'ras',
-    'voxel': 'mri_voxels',
-    'mri': 'mri',
-    'unknown': 'unknown'
+    'CTF': 'ctf_head',
+    '4DBti': 'ctf_head',
+    'KitYokogawa': 'ctf_head',
+    'ElektaNeuromag': 'head',
+    'ChietiItab': 'head',
+    'CapTrak': 'head',
+    'ACPC': 'ras',  # XXX: there is no ACPC in mne-python and so this is a one-way mapping from BIDS -> MNE  # noqa
+    'fsaverage': 'mni_tal',  # XXX: note fsaverage and MNI305 are the same  # noqa
+    'MNI305': 'mni_tal',
+    'Other': 'unknown'
 }
-MNE_TO_BIDS_FRAMES = {val: key for key, val in BIDS_TO_MNE_FRAMES.items()}
+
+# mapping from supported MNE coordinate frames -> BIDS
+# XXX: note that there are a lot fewer MNE available coordinate
+# systems so the range of BIDS supported coordinate systems we
+# can write is limited.
+MNE_TO_BIDS_FRAMES = {
+    'ctf_head': 'CTF',
+    'head': 'CapTrak',
+    'mni_tal': 'fsaverage',
+    # 'fs_tal': 'fsaverage',  # XXX: not used
+    'unknown': 'Other',
+    'ras': 'Other',
+    'mri': 'Other'
+}
 
 # these coordinate frames in mne-python are related to scalp/meg
 # 'meg', 'ctf_head', 'ctf_meg', 'head', 'unknown'
@@ -197,25 +284,24 @@ MNE_STR_TO_FRAME = dict(
 MNE_FRAME_TO_STR = {val: key for key, val in MNE_STR_TO_FRAME.items()}
 
 # see BIDS specification for description we copied over from each
-COORD_FRAME_DESCRIPTIONS = {
+BIDS_COORD_FRAME_DESCRIPTIONS = {
     'ctf': 'ALS orientation and the origin between the ears',
     'elektaneuromag': 'RAS orientation and the origin between the ears',
     '4dbti': 'ALS orientation and the origin between the ears',
     'kityokogawa': 'ALS orientation and the origin between the ears',
     'chietiitab': 'RAS orientation and the origin between the ears',
-    'captrak': 'RAS orientation and the origin between the ears',
-    'mri': 'Defined by Freesurfer, the MRI (surface RAS) origin is at the '
-           'center of a 256×256×256 1mm anisotropic volume '
-           '(may not be in the center of the head).',
-    'mri_voxel': 'Defined by Freesurfer, the MRI (surface RAS) origin '
-                 'is at the center of a 256×256×256 voxel anisotropic '
-                 'volume (may not be in the center of the head).',
-    'mni_tal': 'MNI template in Talairach coordinates',
-    'fs_tal': 'Freesurfer template in Talairach coordinates',
-    'ras': 'RAS means that the first dimension (X) points towards '
-           'the right hand side of the head, the second dimension (Y) '
-           'points towards the Anterior aspect of the head, and the '
-           'third dimension (Z) points towards the top of the head.',
+    'captrak': (
+        'The X-axis goes from the left preauricular point (LPA) through '
+        'the right preauricular point (RPA). '
+        'The Y-axis goes orthogonally to the X-axis through the nasion (NAS). '
+        'The Z-axis goes orthogonally to the XY-plane through the vertex of '
+        'the head. '
+        'This corresponds to a "RAS" orientation with the origin of the '
+        'coordinate system approximately between the ears. '
+        'See Appendix VIII in the BIDS specification.'),
+    'fsaverage': 'Defined by FreeSurfer, the MRI (surface RAS) origin is '
+                 'at the center of a 256×256×256 mm^3 anisotropic volume '
+                 '(may not be in the center of the head).',
 }
 
 REFERENCES = {'mne-bids':
@@ -234,7 +320,7 @@ REFERENCES = {'mne-bids':
               'Wexler, J., Baillet, S. (2018). MEG-BIDS, the brain '
               'imaging data structure extended to magnetoencephalography. '
               'Scientific Data, 5, 180110. '
-              'http://doi.org/10.1038/sdata.2018.110',
+              'https://doi.org/10.1038/sdata.2018.110',
               'eeg':
               'Pernet, C. R., Appelhoff, S., Gorgolewski, K. J., '
               'Flandin, G., Phillips, C., Delorme, A., Oostenveld, R. (2019). '

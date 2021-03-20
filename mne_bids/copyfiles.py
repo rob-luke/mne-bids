@@ -17,11 +17,13 @@ due to internal pointers that are not being updated.
 import os
 import os.path as op
 import re
-
 import shutil as sh
 
-from mne.io import read_raw_brainvision, anonymize_info
 from scipy.io import loadmat, savemat
+
+import mne
+from mne.io import (read_raw_brainvision, read_raw_edf, read_raw_bdf,
+                    anonymize_info)
 
 from mne_bids.path import BIDSPath, _parse_ext, _mkdir_p
 from mne_bids.utils import _get_mrk_meas_date, _check_anonymize
@@ -137,10 +139,18 @@ def copyfile_ctf(src, dest):
 
     Parameters
     ----------
-    src : str
+    src : str | pathlib.Path
         Path to the source raw .ds folder.
-    dest : str
+    dest : str | pathlib.Path
         Path to the destination of the new bids folder.
+
+    See Also
+    --------
+    copyfile_brainvision
+    copyfile_bti
+    copyfile_edf
+    copyfile_eeglab
+    copyfile_kit
 
     """
     _copytree(src, dest)
@@ -162,9 +172,9 @@ def copyfile_kit(src, dest, subject_id, session_id,
 
     Parameters
     ----------
-    src : str
+    src : str | pathlib.Path
         Path to the source raw .con or .sqd folder.
-    dest : str
+    dest : str | pathlib.Path
         Path to the destination of the new bids folder.
     subject_id : str | None
         The subject ID. Corresponds to "sub".
@@ -176,6 +186,14 @@ def copyfile_kit(src, dest, subject_id, session_id,
         The run number. Corresponds to "run".
     _init_kwargs : dict
         Extract information of marker and headpoints
+
+    See Also
+    --------
+    copyfile_brainvision
+    copyfile_bti
+    copyfile_ctf
+    copyfile_edf
+    copyfile_eeglab
 
     """
     # create parent directories in case it does not exist yet
@@ -224,7 +242,7 @@ def _replace_file(fname, pattern, replace):
             line = match.group()[:-len(replace)] + replace + '\n'
         new_content.append(line)
 
-    with open(fname, 'w') as fout:
+    with open(fname, 'w', encoding='utf-8') as fout:
         fout.writelines(new_content)
 
 
@@ -253,9 +271,9 @@ def copyfile_brainvision(vhdr_src, vhdr_dest, anonymize=None, verbose=False):
 
     Parameters
     ----------
-    vhdr_src : str
-        The src path of the .vhdr file to be copied.
-    vhdr_dest : str
+    vhdr_src : str | pathlib.Path
+        The source path of the .vhdr file to be copied.
+    vhdr_dest : str | pathlib.Path
         The destination path of the .vhdr file.
     anonymize : dict | None
         If None (default), no anonymization is performed.
@@ -281,14 +299,19 @@ def copyfile_brainvision(vhdr_src, vhdr_dest, anonymize=None, verbose=False):
     See Also
     --------
     mne.io.anonymize_info
+    copyfile_bti
+    copyfile_ctf
+    copyfile_edf
+    copyfile_eeglab
+    copyfile_kit
 
     """
     # Get extenstion of the brainvision file
     fname_src, ext_src = _parse_ext(vhdr_src)
     fname_dest, ext_dest = _parse_ext(vhdr_dest)
     if ext_src != ext_dest:
-        raise ValueError(f'Need to move data with same extension'
-                         f' but got "{ext_src}", "{ext_dest}"')
+        raise ValueError(f'Need to move data with same extension, '
+                         f' but got "{ext_src}" and "{ext_dest}"')
 
     eeg_file_path, vmrk_file_path = _get_brainvision_paths(vhdr_src)
 
@@ -339,6 +362,119 @@ def copyfile_brainvision(vhdr_src, vhdr_dest, anonymize=None, verbose=False):
             print('Anonymized all dates in VHDR and VMRK.')
 
 
+def copyfile_edf(src, dest, anonymize=None):
+    """Copy an EDF, EDF+, or BDF file to a new location, optionally anonymize.
+
+    .. warning:: EDF/EDF+/BDF files contain two fields for recording dates:
+                 A generic "startdate" field that supports only 2-digit years,
+                 and a "Startdate" field as part of the "local recording
+                 identification", which supports 4-digit years.
+                 If you want to anonymize your file, MNE-BIDS will set the
+                 "startdate" field to 85 (i.e., 1985), the earliest possible
+                 date for that field. However, the "Startdate" field in the
+                 file's "local recording identification" and the date in the
+                 session's corresponding ``scans.tsv`` will be set correctly
+                 according to the argument provided to the ``anonymize``
+                 parameter. Note that it is possible that not all EDF/EDF+/BDF
+                 reading software parses the accurate recording date, and
+                 that for some reading software, the wrong year (1985) may
+                 be parsed.
+
+    Parameters
+    ----------
+    src : str | pathlib.Path
+        The source path of the .edf or .bdf file to be copied.
+    dest : str | pathlib.Path
+        The destination path of the .edf or .bdf file.
+    anonymize : dict | None
+        If None (default), no anonymization is performed.
+        If dict, data will be anonymized depending on the keys provided with
+        the dict: `daysback` is a required key, `keep_his` is an optional key.
+
+        `daysback` : int
+            Number of days by which to move back the recording date in time.
+            In studies with multiple subjects the relative recording date
+            differences between subjects can be kept by using the same number
+            of `daysback` for all subject anonymizations. `daysback` should be
+            great enough to shift the date prior to 1925 to conform with BIDS
+            anonymization rules. Due to limitations of the EDF/BDF format, the
+            year of the anonymized date will always be set to 1985 in the
+            'startdate' field of the file. The correctly-shifted year will be
+            written to the 'local recording identification' region of the
+            file header, which may not be parsed by all EDF/EDF+/BDF reader
+            softwares.
+
+        `keep_his` : bool
+            By default (False), all subject information next to the recording
+            date will be overwritten as well. If True, keep subject information
+            apart from the recording date. Participant names and birthdates
+            will always be anonymized if present, regardless of this setting.
+
+    See Also
+    --------
+    mne.io.anonymize_info
+    copyfile_brainvision
+    copyfile_bti
+    copyfile_ctf
+    copyfile_eeglab
+    copyfile_kit
+
+    """
+    # Ensure source & destination extensions are the same
+    fname_src, ext_src = _parse_ext(src)
+    fname_dest, ext_dest = _parse_ext(dest)
+    if ext_src != ext_dest:
+        raise ValueError(f'Need to move data with same extension, '
+                         f' but got "{ext_src}" and "{ext_dest}"')
+
+    # Copy data prior to any anonymization
+    sh.copyfile(src, dest)
+
+    # Anonymize EDF/BDF data, if requested
+    if anonymize is not None:
+        if ext_src == '.bdf':
+            raw = read_raw_bdf(dest, preload=False, verbose=0)
+        elif ext_src == '.edf':
+            raw = read_raw_edf(dest, preload=False, verbose=0)
+        else:
+            raise ValueError('Unsupported file type ({0})'.format(ext_src))
+
+        # Get subject info, recording info, and recording date
+        with open(dest, 'rb') as f:
+            f.seek(8)  # id_info field starts 8 bytes in
+            id_info = f.read(80).decode('ascii').rstrip()
+            rec_info = f.read(80).decode('ascii').rstrip()
+
+        # Parse metadata from file
+        if len(id_info) == 0 or len(id_info.split(' ')) != 4:
+            id_info = "X X X X"
+        if len(rec_info) == 0 or len(rec_info.split(' ')) != 5:
+            rec_info = "Startdate X X X X"
+        pid, sex, birthdate, name = id_info.split(' ')
+        start_date, admin_code, tech, equip = rec_info.split(' ')[1:5]
+
+        # Try to anonymize the recording date
+        daysback, keep_his = _check_anonymize(anonymize, raw, '.edf')
+        anonymize_info(raw.info, daysback=daysback, keep_his=keep_his)
+        start_date = '01-JAN-1985'
+        meas_date = '01.01.85'
+
+        # Anonymize ID info and write to file
+        if keep_his:
+            # Always remove participant birthdate and name to be safe
+            id_info = [pid, sex, "X", "X"]
+            rec_info = ["Startdate", start_date, admin_code, tech, equip]
+        else:
+            id_info = ["0", "X", "X", "X"]
+            rec_info = ["Startdate", start_date, "X",
+                        "mne-bids_anonymize", "X"]
+        with open(dest, 'r+b') as f:
+            f.seek(8)  # id_info field starts 8 bytes in
+            f.write(bytes(" ".join(id_info).ljust(80), 'ascii'))
+            f.write(bytes(" ".join(rec_info).ljust(80), 'ascii'))
+            f.write(bytes(meas_date, 'ascii'))
+
+
 def copyfile_eeglab(src, dest):
     """Copy a EEGLAB files to a new location and adjust pointer to '.fdt' file.
 
@@ -349,47 +485,58 @@ def copyfile_eeglab(src, dest):
 
     Parameters
     ----------
-    src : str
+    src : str | pathlib.Path
         Path to the source raw .set file.
-    dest : str
+    dest : str | pathlib.Path
         Path to the destination of the new .set file.
 
+    See Also
+    --------
+    copyfile_brainvision
+    copyfile_bti
+    copyfile_ctf
+    copyfile_edf
+    copyfile_kit
+
     """
+    if not mne.utils.check_version('scipy', '1.5.0'):  # pragma: no cover
+        raise ImportError('SciPy >=1.5.0 is required handling EEGLAB data.')
+
     # Get extenstion of the EEGLAB file
-    fname_src, ext_src = _parse_ext(src)
+    _, ext_src = _parse_ext(src)
     fname_dest, ext_dest = _parse_ext(dest)
     if ext_src != ext_dest:
-        raise ValueError('Need to move data with same extension'
+        raise ValueError(f'Need to move data with same extension'
                          f' but got {ext_src}, {ext_dest}')
 
-    # Extract matlab struct "EEG" from EEGLAB file
-    mat = loadmat(src, squeeze_me=False, chars_as_strings=False,
-                  mat_dtype=False, struct_as_record=True)
+    # Load the EEG struct.
+    uint16_codec = None
+    mat = loadmat(file_name=src, simplify_cells=True,
+                  appendmat=False, uint16_codec=uint16_codec)
     if 'EEG' not in mat:
         raise ValueError(f'Could not find "EEG" field in {src}')
     eeg = mat['EEG']
 
-    # If the data field is a string, it points to a .fdt file in src dir
-    data = eeg[0][0]['data']
-    if all([item in data[0, -4:] for item in '.fdt']):
+    if isinstance(eeg['data'], str):
+        # If the data field is a string, it points to a .fdt file in src dir
+        fdt_fname = eeg['data']
+        assert fdt_fname.endswith('.fdt')
         head, tail = op.split(src)
-        fdt_pointer = ''.join(data.tolist()[0])
-        fdt_path = op.join(head, fdt_pointer)
-        fdt_name, fdt_ext = _parse_ext(fdt_path)
-        if fdt_ext != '.fdt':
-            raise IOError('Expected extension .fdt for linked data but found'
-                          f' {fdt_ext}')
+        fdt_path = op.join(head, fdt_fname)
 
-        # Copy the fdt file and give it a new name
+        # Copy the .fdt file and give it a new name
         sh.copyfile(fdt_path, fname_dest + '.fdt')
 
-        # Now adjust the pointer in the set file
+        # Now adjust the pointer in the .set file
         head, tail = op.split(fname_dest + '.fdt')
-        mat['EEG'][0][0]['data'] = tail
-        savemat(dest, mat, appendmat=False)
+        eeg['data'] = tail
 
-    # If no .fdt file, simply copy the .set file, no modifications necessary
+        # Save the EEG dictionary as a Matlab struct again
+        mdict = dict(EEG=eeg)
+        savemat(file_name=dest, mdict=mdict, appendmat=False)
     else:
+        # If no .fdt file, simply copy the .set file, no modifications
+        # necessary
         sh.copyfile(src, dest)
 
 
@@ -398,10 +545,18 @@ def copyfile_bti(raw, dest):
 
     Parameters
     ----------
-    raw : instance of Raw
+    raw : mne.io.Raw
         An MNE-Python raw object of BTi data.
-    dest : str
+    dest : str | pathlib.Path
         Destination to copy the BTi data to.
+
+    See Also
+    --------
+    copyfile_brainvision
+    copyfile_ctf
+    copyfile_edf
+    copyfile_eeglab
+    copyfile_kit
 
     """
     pdf_fname = 'c,rfDC'

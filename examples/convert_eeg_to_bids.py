@@ -18,7 +18,7 @@ data. Specifically, we will follow these steps:
 .. currentmodule:: mne_bids
 
 .. _BrainVision format: https://www.brainproducts.com/productdetails.php?id=21&tab=5
-.. _CapTrak: http://www.fieldtriptoolbox.org/faq/how_are_the_different_head_and_mri_coordinate_systems_defined/#details-of-the-captrak-coordinate-system
+.. _CapTrak: https://www.fieldtriptoolbox.org/faq/how_are_the_different_head_and_mri_coordinate_systems_defined/#details-of-the-captrak-coordinate-system
 
 """  # noqa: E501
 
@@ -28,13 +28,14 @@ data. Specifically, we will follow these steps:
 
 ###############################################################################
 # We are importing everything we need for this example:
-import os
-import shutil as sh
+import os.path as op
+import shutil
 
 import mne
 from mne.datasets import eegbci
 
 from mne_bids import write_raw_bids, BIDSPath, print_dir_tree
+from mne_bids.stats import count_events
 
 ###############################################################################
 # Download the data
@@ -50,7 +51,7 @@ from mne_bids import write_raw_bids, BIDSPath, print_dir_tree
 #
 # In this example, we will download the data for a single subject doing the
 # baseline task "eyes closed" and format it to the Brain Imaging Data Structure
-# (`BIDS <http://bids.neuroimaging.io/>`_).
+# (`BIDS <https://bids.neuroimaging.io/>`_).
 #
 # Conveniently, there is already a data loading function available with
 # MNE-Python:
@@ -68,7 +69,7 @@ eegbci.load_data(subject=subject, runs=run, update_path=True)
 
 # get MNE directory with example data
 mne_data_dir = mne.get_config('MNE_DATASETS_EEGBCI_PATH')
-data_dir = os.path.join(mne_data_dir, 'MNE-eegbci-data')
+data_dir = op.join(mne_data_dir, 'MNE-eegbci-data')
 
 print_dir_tree(data_dir)
 
@@ -99,10 +100,6 @@ edf_path = eegbci.load_data(subject=subject, runs=run)[0]
 raw = mne.io.read_raw_edf(edf_path, preload=False)
 raw.info['line_freq'] = 50  # specify power line frequency as required by BIDS
 
-# For converting the data to BIDS, we need to convert the the annotations
-# stored in the file to a 2D numpy array of events.
-events, event_id = mne.events_from_annotations(raw)
-
 ###############################################################################
 # For the sake of the example we will also pretend that we have the electrode
 # coordinates for the data recordings.
@@ -119,7 +116,7 @@ events, event_id = mne.events_from_annotations(raw)
 
 # Get the electrode coordinates
 testing_data = mne.datasets.testing.data_path()
-captrak_path = os.path.join(testing_data, 'montage', 'captrak_coords.bvct')
+captrak_path = op.join(testing_data, 'montage', 'captrak_coords.bvct')
 montage = mne.channels.read_dig_captrak(captrak_path)
 
 # Rename the montage channel names only for this example, because as said
@@ -160,28 +157,39 @@ subject_id = '001'
 
 # define a task name and a directory where to save the data to
 task = 'RestEyesClosed'
-bids_root = os.path.join(mne_data_dir, 'eegmmidb_bids_eeg_example')
-
-# Start with a clean directory in case the directory existed beforehand
-sh.rmtree(bids_root, ignore_errors=True)
+bids_root = op.join(mne_data_dir, 'eegmmidb_bids_eeg_example')
 
 ###############################################################################
-# Now we just need to specify a few more EEG details to get something sensible:
+# To ensure the output path doesn't contain any leftover files from previous
+# tests and example runs, we simply delete it.
+#
+# .. warning:: Do not delete directories that may contain important data!
+#
 
-# Brief description of the event markers present in the data. This will become
-# the ``trial_type`` column in our BIDS ```events.tsv``.
-# From the online documentation of our downloaded data we know that in the
-# rest "eyes closed" task, there is only a single event marker: "0"
-event_id = {'rest': 0}
+if op.exists(bids_root):
+    shutil.rmtree(bids_root)
 
-# Now convert our data to be in a new BIDS dataset.
+###############################################################################
+# The data contains annotations; which will be converted to events
+# automatically by MNE-BIDS when writing the BIDS data:
+
+print(raw.annotations)
+
+###############################################################################
+# Finally, let's write the BIDS data!
+
 bids_path = BIDSPath(subject=subject_id, task=task, root=bids_root)
-write_raw_bids(raw, bids_path, event_id=event_id,
-               events_data=events, overwrite=True)
+write_raw_bids(raw, bids_path, overwrite=True)
 
 ###############################################################################
 # What does our fresh BIDS directory look like?
 print_dir_tree(bids_root)
+
+###############################################################################
+# Finally let's get an overview of the events on the whole dataset
+
+counts = count_events(bids_root)
+counts
 
 ###############################################################################
 # We can see that MNE-BIDS wrote several important files related to subject 1
@@ -211,8 +219,8 @@ print_dir_tree(bids_root)
 #
 # If you are preparing a manuscript, please make sure to also cite MNE-BIDS
 # there.
-readme = os.path.join(bids_root, 'README')
-with open(readme, 'r') as fid:
+readme = op.join(bids_root, 'README')
+with open(readme, 'r', encoding='utf-8-sig') as fid:
     text = fid.read()
 print(text)
 

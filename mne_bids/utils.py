@@ -14,12 +14,11 @@ from datetime import datetime, date, timedelta, timezone
 from os import path as op
 
 import numpy as np
-from mne import read_events, find_events, events_from_annotations
 from mne.channels import make_standard_montage
 from mne.io.constants import FIFF
 from mne.io.kit.kit import get_kit_info
 from mne.io.pick import pick_types
-from mne.utils import check_version, warn, logger
+from mne.utils import warn, logger
 
 from mne_bids.tsv_handler import _to_tsv, _tsv_to_str
 
@@ -62,15 +61,18 @@ def _get_ch_type_mapping(fro='mne', to='bids'):
     Furthermore, this is not a one-to-one mapping: Incomplete and partially
     one-to-many/many-to-one.
 
+    Bio channels are supported in mne-python and are converted to MISC
+    because there is no "Bio" supported channel in BIDS.
     """
     if fro == 'mne' and to == 'bids':
         mapping = dict(eeg='EEG', misc='MISC', stim='TRIG', emg='EMG',
                        ecog='ECOG', seeg='SEEG', eog='EOG', ecg='ECG',
-                       resp='RESP', fnirs_cw_amplitude='NIRSCW',
+                       resp='RESP', bio='MISC', fnirs_cw_amplitude='NIRSCW',
                        # MEG channels
                        meggradaxial='MEGGRADAXIAL', megmag='MEGMAG',
                        megrefgradaxial='MEGREFGRADAXIAL',
-                       meggradplanar='MEGGRADPLANAR', megrefmag='MEGREFMAG')
+                       meggradplanar='MEGGRADPLANAR', megrefmag='MEGREFMAG',
+                       ias='MEGOTHER', syst='MEGOTHER', exci='MEGOTHER')
 
     elif fro == 'bids' and to == 'mne':
         mapping = dict(EEG='eeg', MISC='misc', TRIG='stim', EMG='emg',
@@ -113,9 +115,9 @@ def _age_on_date(bday, exp_date):
 
     Parameters
     ----------
-    bday : instance of datetime.datetime
+    bday : datetime.datetime
         The birthday of the participant.
-    exp_date : instance of datetime.datetime
+    exp_date : datetime.datetime
         The date the experiment was performed on.
 
     """
@@ -146,7 +148,7 @@ def _write_json(fname, dictionary, overwrite=False, verbose=False):
                               'Please set overwrite to True.')
 
     json_output = json.dumps(dictionary, indent=4)
-    with open(fname, 'w') as fid:
+    with open(fname, 'w', encoding='utf-8') as fid:
         fid.write(json_output)
         fid.write('\n')
 
@@ -172,7 +174,7 @@ def _write_text(fname, text, overwrite=False, verbose=True):
     if op.exists(fname) and not overwrite:
         raise FileExistsError(f'"{fname}" already exists. '
                               'Please set overwrite to True.')
-    with open(fname, 'w') as fid:
+    with open(fname, 'w', encoding='utf-8-sig') as fid:
         fid.write(text)
         fid.write('\n')
 
@@ -187,58 +189,6 @@ def _check_key_val(key, val):
         raise ValueError("Unallowed `-`, `_`, or `/` found in key/value pair"
                          f" {key}: {val}")
     return key, val
-
-
-def _read_events(events_data, event_id, raw, ext, verbose=None):
-    """Read in events data.
-
-    Parameters
-    ----------
-    events_data : str | array | None
-        The events file. If a string, a path to the events file. If an array,
-        the MNE events array (shape n_events, 3). If None, events will be
-        inferred from the stim channel using `find_events`.
-    event_id : dict
-        The event id dict used to create a 'trial_type' column in events.tsv,
-        mapping a description key to an integer valued event code.
-    raw : instance of Raw
-        The data as MNE-Python Raw object.
-    ext : str
-        The extension of the original data file.
-    verbose : bool | str | int | None
-        If not None, override default verbose level (see :func:`mne.verbose`).
-
-    Returns
-    -------
-    events : array, shape = (n_events, 3)
-        The first column contains the event time in samples and the third
-        column contains the event id. The second column is ignored for now but
-        typically contains the value of the trigger channel either immediately
-        before the event or immediately after.
-
-    """
-    if isinstance(events_data, str):
-        events = read_events(events_data, verbose=verbose).astype(int)
-    elif isinstance(events_data, np.ndarray):
-        if events_data.ndim != 2:
-            raise ValueError('Events must have two dimensions, '
-                             f'found {events_data.ndim}')
-        if events_data.shape[1] != 3:
-            raise ValueError('Events must have second dimension of length 3, '
-                             f'found {events_data.shape[1]}')
-        events = events_data
-    elif 'stim' in raw:
-        events = find_events(raw, min_duration=0.001, initial_event=True,
-                             verbose=verbose)
-    elif ext in ['.vhdr', '.set'] and check_version('mne', '0.18'):
-        events, event_id = events_from_annotations(raw, event_id,
-                                                   verbose=verbose)
-    else:
-        warn('No events found or provided. Please make sure to'
-             ' set channel type using raw.set_channel_types'
-             ' or provide events_data.')
-        events = None
-    return events, event_id
 
 
 def _get_mrk_meas_date(mrk):
@@ -261,7 +211,7 @@ def _infer_eeg_placement_scheme(raw):
 
     Parameters
     ----------
-    raw : instance of Raw
+    raw : mne.io.Raw
         The data as MNE-Python Raw object.
 
     Returns
@@ -303,25 +253,6 @@ def _extract_landmarks(dig):
         if FIFF.FIFFV_POINT_RPA in landmarks:
             coords['RPA'] = landmarks[FIFF.FIFFV_POINT_RPA]['r'].tolist()
     return coords
-
-
-def _update_sidecar(sidecar_fname, key, val):
-    """Update a sidecar JSON file with a given key/value pair.
-
-    Parameters
-    ----------
-    sidecar_fname : str | os.PathLike
-        Full name of the data file
-    key : str
-        The key in the sidecar JSON file. E.g. "PowerLineFrequency"
-    val : str
-        The corresponding value to change to in the sidecar JSON file.
-    """
-    with open(sidecar_fname, "r") as fin:
-        sidecar_json = json.load(fin)
-    sidecar_json[key] = val
-    with open(sidecar_fname, "w") as fout:
-        json.dump(sidecar_json, fout)
 
 
 def _scale_coord_to_meters(coord, unit):
@@ -411,7 +342,7 @@ def get_anonymization_daysback(raws):
 
     Parameters
     ----------
-    raw : mne.io.Raw | list of Raw
+    raw : mne.io.Raw | list of mne.io.Raw
         Subject raw data or list of raw data from several subjects.
 
     Returns

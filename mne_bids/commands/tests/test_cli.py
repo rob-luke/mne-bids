@@ -3,7 +3,9 @@
 #          Stefan Appelhoff <stefan.appelhoff@mailbox.org>
 #
 # License: BSD (3-clause)
-from os import path as op
+import os.path as op
+from pathlib import Path
+from functools import partial
 
 import pytest
 
@@ -16,11 +18,22 @@ with warnings.catch_warnings():
     import mne
 
 from mne.datasets import testing
-from mne.utils import run_tests_if_main, ArgvSetter
+from mne.utils import (run_tests_if_main, ArgvSetter, requires_pandas,
+                       requires_version)
+from mne.utils._testing import requires_module
 
-from mne_bids.commands import (mne_bids_raw_to_bids, mne_bids_cp,
-                               mne_bids_mark_bad_channels)
-from mne_bids import BIDSPath, read_raw_bids
+from mne_bids.commands import (mne_bids_raw_to_bids,
+                               mne_bids_cp,
+                               mne_bids_mark_bad_channels,
+                               mne_bids_calibration_to_bids,
+                               mne_bids_crosstalk_to_bids,
+                               mne_bids_count_events,
+                               mne_bids_inspect)
+
+from mne_bids import BIDSPath, read_raw_bids, write_raw_bids
+
+requires_matplotlib = partial(requires_module, name='matplotlib',
+                              call='import matplotlib')
 
 
 base_path = op.join(op.dirname(mne.__file__), 'io')
@@ -53,6 +66,12 @@ def test_raw_to_bids(tmpdir):
     with ArgvSetter(('--subject_id', subject_id, '--task', task, '--raw',
                      raw_fname, '--bids_root', output_path,
                      '--line_freq', 60)):
+        mne_bids_raw_to_bids.run()
+
+    # Test line_freq == 'None'
+    with ArgvSetter(('--subject_id', subject_id, '--task', task, '--raw',
+                     raw_fname, '--bids_root', output_path,
+                     '--line_freq', 'None', '--overwrite', 1)):
         mne_bids_raw_to_bids.run()
 
     # Test EDF files as well
@@ -121,11 +140,11 @@ def test_mark_bad_chanels_single_file(tmpdir):
 
     args = tuple(args)
     with ArgvSetter(args):
-        with pytest.warns(RuntimeWarning, match='The unit for chann*'):
-            mne_bids_mark_bad_channels.run()
+        mne_bids_mark_bad_channels.run()
 
     # Check the data was properly written
-    raw = read_raw_bids(bids_path=bids_path)
+    with pytest.warns(RuntimeWarning, match='The unit for chann*'):
+        raw = read_raw_bids(bids_path=bids_path)
     assert set(old_bads + ch_names) == set(raw.info['bads'])
 
     # Test resettig bad channels.
@@ -136,7 +155,8 @@ def test_mark_bad_chanels_single_file(tmpdir):
         mne_bids_mark_bad_channels.run()
 
     # Check the data was properly written
-    raw = read_raw_bids(bids_path=bids_path)
+    with pytest.warns(RuntimeWarning, match='The unit for chann*'):
+        raw = read_raw_bids(bids_path=bids_path)
     assert raw.info['bads'] == []
 
 
@@ -172,13 +192,120 @@ def test_mark_bad_chanels_multiple_files(tmpdir):
 
     args = tuple(args)
     with ArgvSetter(args):
-        with pytest.warns(RuntimeWarning, match='The unit for chann*'):
-            mne_bids_mark_bad_channels.run()
+        mne_bids_mark_bad_channels.run()
 
     # Check the data was properly written
     for subject in subjects:
-        raw = read_raw_bids(bids_path=bids_path.copy().update(subject=subject))
+        with pytest.warns(RuntimeWarning, match='The unit for chann*'):
+            raw = read_raw_bids(bids_path=bids_path.copy()
+                                .update(subject=subject))
         assert set(old_bads + ch_names) == set(raw.info['bads'])
+
+
+def test_calibration_to_bids(tmpdir):
+    """Test mne_bids calibration_to_bids."""
+
+    # Check that help is printed
+    check_usage(mne_bids_calibration_to_bids)
+
+    output_path = str(tmpdir)
+    data_path = Path(testing.data_path())
+    fine_cal_fname = data_path / 'SSS' / 'sss_cal_mgh.dat'
+    bids_path = BIDSPath(subject=subject_id, root=output_path)
+
+    # Write fine-calibration file and check that it was actually written.
+    args = ('--file', fine_cal_fname, '--subject', subject_id,
+            '--bids_root', output_path)
+    with ArgvSetter(args):
+        mne_bids_calibration_to_bids.run()
+
+    assert bids_path.meg_calibration_fpath.exists()
+
+
+def test_crosstalk_to_bids(tmpdir):
+    """Test mne_bids crosstalk_to_bids."""
+
+    # Check that help is printed
+    check_usage(mne_bids_crosstalk_to_bids)
+
+    output_path = str(tmpdir)
+    data_path = Path(testing.data_path())
+    crosstalk_fname = data_path / 'SSS' / 'ct_sparse.fif'
+    bids_path = BIDSPath(subject=subject_id, root=output_path)
+
+    # Write fine-calibration file and check that it was actually written.
+    # Write fine-calibration file and check that it was actually written.
+    args = ('--file', crosstalk_fname, '--subject', subject_id,
+            '--bids_root', output_path)
+    with ArgvSetter(args):
+        mne_bids_crosstalk_to_bids.run()
+    assert bids_path.meg_crosstalk_fpath.exists()
+
+
+@requires_pandas
+def test_count_events(tmpdir):
+    """Test mne_bids count_events."""
+
+    # Check that help is printed
+    check_usage(mne_bids_count_events)
+
+    # Create test dataset.
+    output_path = str(tmpdir)
+    data_path = testing.data_path()
+    raw_fname = op.join(data_path, 'MEG', 'sample',
+                        'sample_audvis_trunc_raw.fif')
+
+    raw = mne.io.read_raw(raw_fname)
+    raw.info['line_freq'] = 60.
+    events = mne.find_events(raw)
+    event_id = {'auditory/left': 1, 'auditory/right': 2, 'visual/left': 3,
+                'visual/right': 4, 'face': 5, 'button': 32}
+
+    bids_path = BIDSPath(subject='01', root=output_path)
+    write_raw_bids(raw, bids_path, events, event_id, overwrite=True,
+                   verbose=False)
+
+    with ArgvSetter(('--bids_root', output_path)):
+        mne_bids_count_events.run()
+
+    with ArgvSetter(('--bids_root', output_path, '--describe')):
+        mne_bids_count_events.run()
+
+
+@requires_matplotlib
+@requires_version('mne', '0.22')
+def test_inspect(tmpdir):
+    """Test mne_bids inspect."""
+
+    # Check that help is printed
+    check_usage(mne_bids_inspect)
+
+    # Create test dataset.
+    bids_root = str(tmpdir)
+    data_path = testing.data_path()
+    subject = '01'
+    task = 'test'
+    datatype = 'meg'
+    raw_fname = op.join(data_path, 'MEG', 'sample',
+                        'sample_audvis_trunc_raw.fif')
+
+    raw = mne.io.read_raw(raw_fname)
+    raw.info['line_freq'] = 60.
+
+    bids_path = BIDSPath(subject=subject, task=task, datatype=datatype,
+                         root=bids_root)
+    write_raw_bids(raw, bids_path, overwrite=True, verbose=False)
+
+    import matplotlib
+    matplotlib.use('agg')
+
+    h_freqs = (30.0, 30, '30')
+    for h_freq in h_freqs:
+        args = ('--bids_root', bids_root, '--h_freq', h_freq,
+                '--find_flat', 0)
+        with ArgvSetter(args):
+            with pytest.warns(RuntimeWarning, match='The unit for chann*'):
+                mne_bids_inspect.run()
 
 
 run_tests_if_main()

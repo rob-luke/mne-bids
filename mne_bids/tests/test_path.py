@@ -11,7 +11,6 @@ import warnings
 from pathlib import Path
 import shutil
 from datetime import datetime, timezone
-from distutils.version import LooseVersion
 
 import pytest
 
@@ -22,14 +21,15 @@ with warnings.catch_warnings():
     import mne
 
 from mne.datasets import testing
-from mne.utils import _TempDir, check_version
 from mne.io import anonymize_info
 
 from mne_bids import (get_datatypes, get_entity_vals, print_dir_tree,
-                      BIDSPath, write_raw_bids, read_raw_bids)
+                      BIDSPath, write_raw_bids, read_raw_bids,
+                      write_meg_calibration, write_meg_crosstalk)
 from mne_bids.path import (_parse_ext, get_entities_from_fname,
                            _find_best_candidates, _find_matching_sidecar,
                            _filter_fnames)
+from mne_bids.config import ALLOWED_PATH_ENTITIES_SHORT
 
 from test_read import _read_raw_fif, warning_str
 
@@ -57,16 +57,25 @@ def return_bids_test_dir(tmpdir_factory):
                 'Visual/Right': 4, 'Smiley': 5, 'Button': 32}
     events_fname = op.join(data_path, 'MEG', 'sample',
                            'sample_audvis_trunc_raw-eve.fif')
+    cal_fname = op.join(data_path, 'SSS', 'sss_cal_mgh.dat')
+    crosstalk_fname = op.join(data_path, 'SSS', 'ct_sparse.fif')
 
     raw = mne.io.read_raw_fif(raw_fname)
     raw.info['line_freq'] = 60
+
+    # Drop unknown events.
+    events = mne.read_events(events_fname)
+    events = events[events[:, 2] != 0]
+
     bids_path.update(root=bids_root)
     # Write multiple runs for test_purposes
     for run_idx in [run, '02']:
         name = bids_path.copy().update(run=run_idx)
-        write_raw_bids(raw, name, events_data=events_fname,
+        write_raw_bids(raw, name, events_data=events,
                        event_id=event_id, overwrite=True)
 
+    write_meg_calibration(cal_fname, bids_path=bids_path)
+    write_meg_crosstalk(crosstalk_fname, bids_path=bids_path)
     return bids_root
 
 
@@ -81,7 +90,7 @@ def test_get_keys(return_bids_test_dir):
                           ('subject', [subject_id], None),
                           ('session', [session_id], None),
                           ('run', [run, '02'], None),
-                          ('acquisition', [], None),
+                          ('acquisition', ['calibration', 'crosstalk'], None),
                           ('task', [task], None),
                           ('subject', [], dict(ignore_subjects=[subject_id])),
                           ('subject', [], dict(ignore_subjects=subject_id)),
@@ -91,7 +100,8 @@ def test_get_keys(return_bids_test_dir):
                           ('run', [run], dict(ignore_runs='02')),
                           ('task', [], dict(ignore_tasks=[task])),
                           ('task', [], dict(ignore_tasks=task)),
-                          ('run', [run, '02'], dict(ignore_runs=['bogus']))])
+                          ('run', [run, '02'], dict(ignore_runs=['bogus'])),
+                          ('run', [], dict(ignore_datatypes=['meg']))])
 def test_get_entity_vals(entity, expected_vals, kwargs, return_bids_test_dir):
     """Test getting a list of entities."""
     bids_root = return_bids_test_dir
@@ -105,6 +115,15 @@ def test_get_entity_vals(entity, expected_vals, kwargs, return_bids_test_dir):
         vals = get_entity_vals(root=bids_root, entity_key=entity,
                                **kwargs)
         assert vals == expected_vals
+
+        # test using ``with_key`` kwarg
+        entities = get_entity_vals(root=bids_root, entity_key=entity,
+                                   with_key=True, **kwargs)
+        entity_long_to_short = {
+            val: key for key, val in ALLOWED_PATH_ENTITIES_SHORT.items()
+        }
+        assert entities == [f'{entity_long_to_short[entity]}-{val}'
+                            for val in expected_vals]
 
 
 def test_print_dir_tree(capsys):
@@ -141,38 +160,46 @@ def test_print_dir_tree(capsys):
     # test if pathlib.Path object
     print_dir_tree(Path(test_dir))
 
+    # test returning a string
+    out = print_dir_tree(test_dir, return_str=True, max_depth=1)
+    assert isinstance(out, str)
+    assert '|--- test_utils.py' in out.split('\n')
+    assert '|--- __pycache__{}'.format(os.sep) in out.split('\n')
+    assert '.pyc' not in out
 
-def test_make_folders():
+    # errors if return_str not a bool
+    with pytest.raises(ValueError, match='must be either True or False.'):
+        print_dir_tree(test_dir, return_str='yes')
+
+
+def test_make_folders(tmpdir):
     """Test that folders are created and named properly."""
     # Make sure folders are created properly
-    bids_root = _TempDir()
-    bids_path = BIDSPath(subject='hi', session='foo',
-                         datatype='eeg', root=bids_root)
+    bids_path = BIDSPath(subject='01', session='foo',
+                         datatype='eeg', root=str(tmpdir))
     bids_path.mkdir().directory
-    assert op.isdir(op.join(bids_root, 'sub-hi', 'ses-foo', 'eeg'))
+    assert op.isdir(tmpdir / 'sub-01' / 'ses-foo' / 'eeg')
 
     # If we remove a kwarg the folder shouldn't be created
-    bids_root = _TempDir()
-    bids_path = BIDSPath(subject='hi', datatype='eeg',
-                         root=bids_root)
+    bids_path = BIDSPath(subject='02', datatype='eeg',
+                         root=tmpdir)
     bids_path.mkdir().directory
-    assert op.isdir(op.join(bids_root, 'sub-hi', 'eeg'))
+    assert op.isdir(tmpdir / 'sub-02' / 'eeg')
 
     # Check if a pathlib.Path bids_root works.
-    bids_root = Path(_TempDir())
-    bids_path = BIDSPath(subject='hi', session='foo',
-                         datatype='eeg', root=bids_root)
+    bids_path = BIDSPath(subject='03', session='foo',
+                         datatype='eeg', root=Path(tmpdir))
     bids_path.mkdir().directory
-    assert op.isdir(op.join(bids_root, 'sub-hi', 'ses-foo', 'eeg'))
+    assert op.isdir(tmpdir / 'sub-03' / 'ses-foo' / 'eeg')
 
     # Check if bids_root=None creates folders in the current working directory
-    bids_root = _TempDir()
+    bids_root = tmpdir.mkdir("tmp")
     curr_dir = os.getcwd()
     os.chdir(bids_root)
-    bids_path = BIDSPath(subject='hi', session='foo',
+    bids_path = BIDSPath(subject='04', session='foo',
                          datatype='eeg')
     bids_path.mkdir().directory
-    assert op.isdir(op.join(os.getcwd(), 'sub-hi', 'ses-foo', 'eeg'))
+    assert op.isdir(op.join(os.getcwd(), 'sub-04', 'ses-foo', 'eeg'))
     os.chdir(curr_dir)
 
 
@@ -203,7 +230,7 @@ def test_parse_ext():
     ('/bids_root/sub-01/ses-02/meg/' +
      'sub-01_ses-02_task-test_run-3_split-01_meg.fif'),
 ])
-def test_parse_bids_filename(fname):
+def test_get_entities_from_fname(fname):
     """Test parsing entities from a bids filename."""
     params = get_entities_from_fname(fname)
     print(params)
@@ -217,6 +244,44 @@ def test_parse_bids_filename(fname):
     assert list(params.keys()) == ['subject', 'session', 'task',
                                    'acquisition', 'run', 'processing',
                                    'space', 'recording', 'split', 'suffix']
+
+
+@pytest.mark.parametrize('fname', [
+    'sub-01_ses-02_task-test_run-3_split-01_meg.fif',
+    ('/bids_root/sub-01/ses-02/meg/'
+     'sub-01_ses-02_task-test_run-3_split-01_meg.fif'),
+    'sub-01_ses-02_task-test_run-3_split-01_desc-tfr_meg.fif',
+])
+def test_get_entities_from_fname_errors(fname):
+    """Test parsing entities from bids filename.
+
+    Extends utility for not supported BIDS entities, such
+    as 'description'.
+    """
+    if 'desc' in fname:
+        with pytest.raises(KeyError, match='Unexpected entity'):
+            params = get_entities_from_fname(fname, on_error='raise')
+        with pytest.warns(RuntimeWarning, match='Unexpected entity'):
+            params = get_entities_from_fname(fname, on_error='warn')
+        params = get_entities_from_fname(fname, on_error='ignore')
+    else:
+        params = get_entities_from_fname(fname, on_error='raise')
+
+    expected_keys = ['subject', 'session', 'task',
+                     'acquisition', 'run', 'processing',
+                     'space', 'recording', 'split', 'suffix']
+
+    assert params['subject'] == '01'
+    assert params['session'] == '02'
+    assert params['run'] == '3'
+    assert params['task'] == 'test'
+    assert params['split'] == '01'
+    if 'meg' in fname:
+        assert params['suffix'] == 'meg'
+    if 'desc' in fname:
+        assert params['desc'] == 'tfr'
+        expected_keys.append('desc')
+    assert list(params.keys()) == expected_keys
 
 
 @pytest.mark.parametrize('candidate_list, best_candidates', [
@@ -269,23 +334,23 @@ def test_find_matching_sidecar(return_bids_test_dir):
                                        extension='.bogus')
 
     # Find nothing and receive None and a warning.
-    on_fail = 'warn'
+    on_error = 'warn'
     with pytest.warns(RuntimeWarning, match='Did not find any'):
         fname = _find_matching_sidecar(bids_fpath, suffix='foo',
-                                       extension='.bogus', on_fail=on_fail)
+                                       extension='.bogus', on_error=on_error)
     assert fname is None
 
     # Find nothing and receive None.
-    on_fail = 'ignore'
+    on_error = 'ignore'
     fname = _find_matching_sidecar(bids_fpath, suffix='foo',
-                                   extension='.bogus', on_fail=on_fail)
+                                   extension='.bogus', on_error=on_error)
     assert fname is None
 
-    # Invalid on_fail.
-    on_fail = 'hello'
-    with pytest.raises(ValueError, match='Acceptable values for on_fail are'):
+    # Invalid on_error.
+    on_error = 'hello'
+    with pytest.raises(ValueError, match='Acceptable values for on_error are'):
         _find_matching_sidecar(bids_fpath, suffix='coordsystem',
-                               extension='.json', on_fail=on_fail)
+                               extension='.json', on_error=on_error)
 
 
 def test_bids_path_inference(return_bids_test_dir):
@@ -323,7 +388,7 @@ def test_bids_path_inference(return_bids_test_dir):
     Path(extra_file).parent.mkdir(exist_ok=True, parents=True)
     # Creates a new file and because of this new file, there is now
     # ambiguity
-    with open(extra_file, 'w'):
+    with open(extra_file, 'w', encoding='utf-8'):
         pass
     with pytest.raises(RuntimeError, match='Found data of more than one'):
         channels_fname.fpath
@@ -437,10 +502,33 @@ def test_bids_path(return_bids_test_dir):
     suffix = 'meeg'
     bids_path = BIDSPath(subject=subject_id, session=session_id,
                          suffix=suffix, check=False)
+
     # also inherits error check from instantiation
     # always error check datatype
     with pytest.raises(ValueError, match='datatype .* is not valid'):
         bids_path.copy().update(datatype=error_kind)
+
+    # does not error check on space if check=False ...
+    BIDSPath(subject=subject_id, space='foo', suffix='eeg', check=False)
+
+    # ... but raises an error with check=True
+    match = r'space \(foo\) is not valid for datatype \(eeg\)'
+    with pytest.raises(ValueError, match=match):
+        BIDSPath(subject=subject_id, space='foo', suffix='eeg')
+
+    # error check on space for datatypes that do not support space
+    match = 'space entity is not valid for datatype anat'
+    with pytest.raises(ValueError, match=match):
+        BIDSPath(subject=subject_id, space='foo', datatype='anat')
+
+    # error check on space if datatype is None
+    bids_path_tmpcopy = bids_path.copy().update(suffix='meeg')
+    match = 'You must define datatype if you want to use space'
+    with pytest.raises(ValueError, match=match):
+        bids_path_tmpcopy.update(space='CapTrak', check=True)
+
+    # making a valid space update works
+    bids_path_tmpcopy.update(suffix='eeg', space="CapTrak", check=True)
 
     # suffix won't be error checks if initial check was false
     bids_path.update(suffix=suffix)
@@ -470,6 +558,13 @@ def test_bids_path(return_bids_test_dir):
     # test that split gets properly set
     bids_path.update(split=1)
     assert bids_path.basename == 'sub-01_ses-02_task-03_split-01_ieeg.mat'
+
+    # test home dir expansion
+    bids_path = BIDSPath(root='~/foo')
+    assert '~/foo' not in str(bids_path.root)
+    # explicitly test update() method too
+    bids_path.update(root='~/foo')
+    assert '~/foo' not in str(bids_path.root)
 
 
 def test_make_filenames():
@@ -536,7 +631,6 @@ def test_make_filenames():
     ])
 def test_filter_fnames(entities, expected_n_matches):
     """Test filtering filenames based on BIDS entities works."""
-
     fnames = ('sub-01_task-audio_meg.fif',
               'sub-01_ses-05_task-audio_meg.fif',
               'sub-02_task-visual_eeg.vhdr',
@@ -557,7 +651,7 @@ def test_match(return_bids_test_dir):
 
     bids_path_01 = BIDSPath(root=bids_root)
     paths = bids_path_01.match()
-    assert len(paths) == 7
+    assert len(paths) == 9
     assert all('sub-01_ses-01' in p.basename for p in paths)
     assert all([p.root == bids_root for p in paths])
 
@@ -591,16 +685,55 @@ def test_match(return_bids_test_dir):
     assert len(paths) == 1
     assert paths[0].extension == '.fif'
 
+    # Check handling of `extension` and `suffix`, part 1: no suffix
+    bids_path_01 = BIDSPath(root=bids_root, run='01', extension='.tsv',
+                            datatype='meg')
+    paths = bids_path_01.match()
+    assert len(paths) == 2
+    assert paths[0].extension == '.tsv'
+
+    # Check handling of `extension` and `suffix`, part 1: suffix passed
+    bids_path_01 = BIDSPath(root=bids_root, run='01',
+                            suffix='channels', extension='.tsv',
+                            datatype='meg')
+    paths = bids_path_01.match()
+    assert len(paths) == 1
+    assert paths[0].extension == '.tsv'
+    assert paths[0].suffix == 'channels'
+
+    # Check handling of `datatype` when explicitly passed in
+    print_dir_tree(bids_root)
+    bids_path_01 = BIDSPath(root=bids_root, run='01',
+                            suffix='channels', extension='.tsv',
+                            datatype='meg')
+    paths = bids_path_01.match()
+    print(paths)
+    assert len(paths) == 1
+    assert paths[0].extension == '.tsv'
+    assert paths[0].suffix == 'channels'
+    assert Path(paths[0]).parent.name == 'meg'
+
+    # Check handling of `datatype`, no datatype passed in
+    # should be exactly the same if there is only one datatype
+    # present in the dataset
+    bids_path_01 = BIDSPath(root=bids_root, run='01',
+                            suffix='channels', extension='.tsv')
+    paths = bids_path_01.match()
+    assert len(paths) == 1
+    assert paths[0].extension == '.tsv'
+    assert paths[0].suffix == 'channels'
+    assert Path(paths[0]).parent.name == 'meg'
+
 
 @pytest.mark.filterwarnings(warning_str['meas_date_set_to_none'])
 @pytest.mark.filterwarnings(warning_str['channel_unit_changed'])
-def test_find_empty_room(return_bids_test_dir):
+def test_find_empty_room(return_bids_test_dir, tmpdir):
     """Test reading of empty room data."""
     data_path = testing.data_path()
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
-    bids_root = _TempDir()
-    tmp_dir = _TempDir()
+    bids_root = tmpdir.mkdir("bids")
+    tmp_dir = tmpdir.mkdir("tmp")
 
     raw = _read_raw_fif(raw_fname)
     bids_path = BIDSPath(subject='01', session='01',
@@ -620,7 +753,7 @@ def test_find_empty_room(return_bids_test_dir):
     raw.copy().crop(0, 10).save(er_raw_fname, overwrite=True)
     er_raw = _read_raw_fif(er_raw_fname)
 
-    if not isinstance(er_raw.info['meas_date'], datetime):
+    if not isinstance(er_raw.info['meas_date'], datetime):  # pragma: no cover
         # mne < v0.20
         er_date = datetime.fromtimestamp(er_raw.info['meas_date'][0])
     else:
@@ -642,11 +775,7 @@ def test_find_empty_room(return_bids_test_dir):
         er_bids_path.update(session=date)
         er_meas_date = datetime.strptime(date, '%Y%m%d')
         er_meas_date = er_meas_date.replace(tzinfo=timezone.utc)
-
-        if check_version('mne', '0.20'):
-            er_raw.set_meas_date(er_meas_date)
-        else:
-            er_raw.info['meas_date'] = (er_meas_date.timestamp(), 0)
+        er_raw.set_meas_date(er_meas_date)
         write_raw_bids(er_raw, er_bids_path)
 
     best_er_basename = bids_path.find_empty_room()
@@ -658,11 +787,7 @@ def test_find_empty_room(return_bids_test_dir):
 
     # assert that we get error if meas_date is not available.
     raw = read_raw_bids(bids_path=bids_path)
-    if check_version('mne', '0.20'):
-        raw.set_meas_date(None)
-    else:
-        raw.info['meas_date'] = None
-        raw.annotations.orig_time = None
+    raw.set_meas_date(None)
     anonymize_info(raw.info)
     write_raw_bids(raw, bids_path, overwrite=True)
     with pytest.raises(ValueError, match='The provided recording does not '
@@ -671,13 +796,13 @@ def test_find_empty_room(return_bids_test_dir):
 
 
 @pytest.mark.filterwarnings(warning_str['channel_unit_changed'])
-def test_find_emptyroom_ties():
+def test_find_emptyroom_ties(tmpdir):
     """Test that we receive a warning on a date tie."""
     data_path = testing.data_path()
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
 
-    bids_root = _TempDir()
+    bids_root = str(tmpdir)
     bids_path.update(root=bids_root)
     session = '20010101'
     er_dir_path = BIDSPath(subject='emptyroom', session=session,
@@ -693,13 +818,8 @@ def test_find_emptyroom_ties():
     er_raw_fname = op.join(data_path, 'MEG', 'sample', 'ernoise_raw.fif')
     raw.copy().crop(0, 10).save(er_raw_fname, overwrite=True)
     er_raw = _read_raw_fif(er_raw_fname)
-
-    if check_version('mne', '0.20'):
-        raw.set_meas_date(meas_date)
-        er_raw.set_meas_date(meas_date)
-    else:
-        raw.info['meas_date'] = (meas_date.timestamp(), 0)
-        er_raw.info['meas_date'] = (meas_date.timestamp(), 0)
+    raw.set_meas_date(meas_date)
+    er_raw.set_meas_date(meas_date)
 
     write_raw_bids(raw, bids_path, overwrite=True)
     er_bids_path = BIDSPath(subject='emptyroom', session=session)
@@ -713,16 +833,14 @@ def test_find_emptyroom_ties():
         bids_path.find_empty_room()
 
 
-@pytest.mark.skipif(LooseVersion(mne.__version__) < LooseVersion('0.21'),
-                    reason="requires mne 0.21.dev0 or higher")
 @pytest.mark.filterwarnings(warning_str['channel_unit_changed'])
-def test_find_emptyroom_no_meas_date():
+def test_find_emptyroom_no_meas_date(tmpdir):
     """Test that we warn if measurement date can be read or inferred."""
     data_path = testing.data_path()
     raw_fname = op.join(data_path, 'MEG', 'sample',
                         'sample_audvis_trunc_raw.fif')
 
-    bids_root = _TempDir()
+    bids_root = str(tmpdir)
     bids_path.update(root=bids_root)
     er_session = 'mysession'
     er_meas_date = None
@@ -762,3 +880,86 @@ def test_bids_path_label_vs_index_entity():
         BIDSPath(root=1, subject='01')
     BIDSPath(subject='01', run=1)  # ok as <index> entity
     BIDSPath(subject='01', split=1)  # ok as <index> entity
+
+
+def test_meg_calibration_fpath(return_bids_test_dir):
+    bids_root = return_bids_test_dir
+
+    # File exists, so BIDSPath.meg_calibration_fpath should return a non-None
+    # value.
+    bids_path_ = bids_path.copy().update(subject='01', root=bids_root)
+    assert bids_path_.meg_calibration_fpath is not None
+
+    # subject not set.
+    bids_path_ = bids_path.copy().update(root=bids_root, subject=None)
+    with pytest.raises(ValueError, match='root and subject must be set'):
+        bids_path_.meg_calibration_fpath
+
+    # root not set.
+    bids_path_ = bids_path.copy().update(subject='01', root=None)
+    with pytest.raises(ValueError, match='root and subject must be set'):
+        bids_path_.meg_calibration_fpath
+
+    # datatype is not 'meg''.
+    bids_path_ = bids_path.copy().update(subject='01', root=bids_root,
+                                         datatype='eeg')
+    with pytest.raises(ValueError, match='Can only find .* for MEG'):
+        bids_path_.meg_calibration_fpath
+
+    # Delete the fine-calibration file. BIDSPath.meg_calibration_fpath
+    # should then return None.
+    bids_path_ = bids_path.copy().update(subject='01', root=bids_root)
+    Path(bids_path_.meg_calibration_fpath).unlink()
+    assert bids_path_.meg_calibration_fpath is None
+
+
+def test_meg_crosstalk_fpath(return_bids_test_dir):
+    bids_root = return_bids_test_dir
+
+    # File exists, so BIDSPath.crosstalk_fpath should return a non-None
+    # value.
+    bids_path_ = bids_path.copy().update(subject='01', root=bids_root)
+    assert bids_path_.meg_crosstalk_fpath is not None
+
+    # subject not set.
+    bids_path_ = bids_path.copy().update(root=bids_root, subject=None)
+    with pytest.raises(ValueError, match='root and subject must be set'):
+        bids_path_.meg_crosstalk_fpath
+
+    # root not set.
+    bids_path_ = bids_path.copy().update(subject='01', root=None)
+    with pytest.raises(ValueError, match='root and subject must be set'):
+        bids_path_.meg_crosstalk_fpath
+
+    # datatype is not 'meg''.
+    bids_path_ = bids_path.copy().update(subject='01', root=bids_root,
+                                         datatype='eeg')
+    with pytest.raises(ValueError, match='Can only find .* for MEG'):
+        bids_path_.meg_crosstalk_fpath
+
+    # Delete the crosstalk file. BIDSPath.meg_crosstalk_fpath should then
+    # return None.
+    bids_path_ = bids_path.copy().update(subject='01', root=bids_root)
+    Path(bids_path_.meg_crosstalk_fpath).unlink()
+    assert bids_path_.meg_crosstalk_fpath is None
+
+
+def test_datasetdescription_with_bidspath(return_bids_test_dir):
+    with pytest.raises(ValueError, match='Unallowed'):
+        bids_path = BIDSPath(
+            root=return_bids_test_dir, suffix='dataset_description',
+            extension='.json')
+
+    # initialization should work
+    bids_path = BIDSPath(
+        root=return_bids_test_dir, suffix='dataset_description',
+        extension='.json', check=False)
+    assert bids_path.fpath.as_posix() == \
+           Path(f'{return_bids_test_dir}/dataset_description.json').as_posix()
+
+    # setting it via update should work
+    bids_path = BIDSPath(root=return_bids_test_dir,
+                         extension='.json', check=True)
+    bids_path.update(suffix='dataset_description', check=False)
+    assert bids_path.fpath.as_posix() == \
+           Path(f'{return_bids_test_dir}/dataset_description.json').as_posix()

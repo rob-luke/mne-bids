@@ -1,11 +1,13 @@
 numpy>=1.14
-scipy>=0.18.1
-mne>=0.19.1
+scipy>=1.5.0
+mne>=0.21.2
 nibabel>=2.2
-pybv
-pytest<5.4
+pybv>=0.4
+pytest
 pytest-cov
 pytest-sugar
 check-manifest
 pydocstyle
 flake8
+matplotlib
+pandas>=0.23.4

@@ -11,15 +11,14 @@ import json
 import re
 import os
 import os.path as op
-from datetime import datetime, timezone
-import shutil as sh
+from datetime import datetime, timezone, timedelta
+import shutil
 from collections import defaultdict, OrderedDict
 
 import numpy as np
 from scipy import linalg
-from numpy.testing import assert_array_equal
-from mne.transforms import (_get_trans, apply_trans, get_ras_to_neuromag_trans,
-                            rotation, translation)
+import mne
+from mne.transforms import (_get_trans, apply_trans, rotation, translation)
 from mne import Epochs
 from mne.io.constants import FIFF
 from mne.io.pick import channel_type
@@ -29,31 +28,32 @@ try:
 except ImportError:
     from mne._digitization._utils import _get_fid_coords
 from mne.channels.channels import _unit2human
-from mne.utils import check_version, has_nibabel, logger, warn
+from mne.utils import check_version, has_nibabel, logger, warn, _validate_type
+import mne.preprocessing
 from mne.io.nirx.nirx import RawNIRX
 
 from mne.io.pick import _picks_to_idx
 
 
 from mne_bids.pick import coil_type
-from mne_bids.dig import _write_dig_bids, _coordsystem_json
+from mne_bids.dig import _write_dig_bids, _write_coordsystem_json
 from mne_bids.utils import (_write_json, _write_tsv, _write_text,
-                            _read_events, _age_on_date,
-                            _infer_eeg_placement_scheme,
+                            _age_on_date, _infer_eeg_placement_scheme,
                             _handle_datatype, _get_ch_type_mapping,
                             _check_anonymize, _stamp_to_dt)
-from mne_bids import read_raw_bids
-from mne_bids.path import BIDSPath, _parse_ext, _mkdir_p, _path_to_str
+from mne_bids import BIDSPath
+from mne_bids.path import _parse_ext, _mkdir_p, _path_to_str
 from mne_bids.copyfiles import (copyfile_brainvision, copyfile_eeglab,
-                                copyfile_ctf, copyfile_bti, copyfile_kit)
+                                copyfile_ctf, copyfile_bti, copyfile_kit,
+                                copyfile_edf)
 from mne_bids.tsv_handler import (_from_tsv, _drop, _contains_row,
                                   _combine_rows)
-from mne_bids.read import _get_bads_from_tsv_data, _find_matching_sidecar
+from mne_bids.read import _find_matching_sidecar, _read_events
 
 from mne_bids.config import (ORIENTATION, UNITS, MANUFACTURERS,
                              IGNORED_CHANNELS, ALLOWED_DATATYPE_EXTENSIONS,
                              BIDS_VERSION, REFERENCES, _map_options, reader,
-                             ALLOWED_INPUT_EXTENSIONS)
+                             ALLOWED_INPUT_EXTENSIONS, CONVERT_FORMATS)
 
 
 def _is_numeric(n):
@@ -122,9 +122,9 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
 
     Parameters
     ----------
-    raw : instance of Raw
+    raw : mne.io.Raw
         The data as MNE-Python Raw object.
-    fname : str | BIDSPath
+    fname : str | mne_bids.BIDSPath
         Filename to save the channels.tsv to.
     overwrite : bool
         Whether to overwrite the existing file.
@@ -152,7 +152,9 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
                     ecg='ElectroCardioGram',
                     eog='ElectroOculoGram',
                     emg='ElectroMyoGram',
-                    misc='Miscellaneous')
+                    misc='Miscellaneous',
+                    bio='Biological',
+                    ias='Internal Active Shielding')
     get_specific = ('mag', 'ref_meg', 'grad')
 
     # get the manufacturer from the file in the Raw object
@@ -224,7 +226,7 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
     _write_tsv(fname, ch_data, overwrite, verbose)
 
 
-def _events_tsv(events, raw, fname, trial_type, overwrite=False,
+def _events_tsv(events, durations, raw, fname, trial_type, overwrite=False,
                 verbose=True):
     """Create an events.tsv file and save it.
 
@@ -235,14 +237,16 @@ def _events_tsv(events, raw, fname, trial_type, overwrite=False,
 
     Parameters
     ----------
-    events : array, shape = (n_events, 3)
+    events : np.ndarray, shape = (n_events, 3)
         The first column contains the event time in samples and the third
         column contains the event id. The second column is ignored for now but
         typically contains the value of the trigger channel either immediately
         before the event or immediately after.
-    raw : instance of Raw
+    durations : np.ndarray, shape (n_events,)
+        The event durations in seconds.
+    raw : mne.io.Raw
         The data as MNE-Python Raw object.
-    fname : str | BIDSPath
+    fname : str | mne_bids.BIDSPath
         Filename to save the events.tsv to.
     trial_type : dict | None
         Dictionary mapping a brief description key to an event id (value). For
@@ -252,11 +256,6 @@ def _events_tsv(events, raw, fname, trial_type, overwrite=False,
         Defaults to False.
     verbose : bool
         Set verbose output to True or False.
-
-    Notes
-    -----
-    The function writes durations of zero for each event.
-
     """
     # Start by filling all data that we know into an ordered dictionary
     first_samp = raw.first_samp
@@ -266,7 +265,7 @@ def _events_tsv(events, raw, fname, trial_type, overwrite=False,
 
     # Onset column needs to be specified in seconds
     data = OrderedDict([('onset', events[:, 0] / sfreq),
-                        ('duration', np.zeros(events.shape[0])),
+                        ('duration', durations),
                         ('trial_type', None),
                         ('value', events[:, 2]),
                         ('sample', events[:, 0])])
@@ -293,7 +292,7 @@ def _readme(datatype, fname, overwrite=False, verbose=True):
     ----------
     datatype : string
         The type of data contained in the raw file ('meg', 'eeg', 'ieeg')
-    fname : str | BIDSPath
+    fname : str | mne_bids.BIDSPath
         Filename to save the README to.
     overwrite : bool
         Whether to overwrite the existing file (defaults to False).
@@ -305,7 +304,7 @@ def _readme(datatype, fname, overwrite=False, verbose=True):
         Set verbose output to True or False.
     """
     if os.path.isfile(fname) and not overwrite:
-        with open(fname, 'r') as fid:
+        with open(fname, 'r', encoding='utf-8-sig') as fid:
             orig_data = fid.read()
         mne_bids_ref = REFERENCES['mne-bids'] in orig_data
         datatype_ref = REFERENCES[datatype] in orig_data
@@ -331,11 +330,11 @@ def _participants_tsv(raw, subject_id, fname, overwrite=False,
 
     Parameters
     ----------
-    raw : instance of Raw
+    raw : mne.io.Raw
         The data as MNE-Python Raw object.
     subject_id : str
         The subject name in BIDS compatible format ('01', '02', etc.)
-    fname : str | BIDSPath
+    fname : str | mne_bids.BIDSPath
         Filename to save the participants.tsv to.
     overwrite : bool
         Whether to overwrite the existing file.
@@ -398,6 +397,17 @@ def _participants_tsv(raw, subject_id, fname, overwrite=False,
                                   f'the participant list. Please set '
                                   f'overwrite to True.')
 
+        # Append any columns the original data did not have
+        # that mne-bids is trying to write. This handles
+        # the edge case where users write participants data for
+        # a subset of `hand`, `age` and `sex`.
+        for key in data.keys():
+            if key in orig_data:
+                continue
+
+            # add 'n/a' if any missing columns
+            orig_data[key] = ['n/a'] * len(next(iter(data.values())))
+
         # Append any additional columns that original data had.
         # Keep the original order of the data by looping over
         # the original OrderedDict keys
@@ -426,7 +436,7 @@ def _participants_json(fname, overwrite=False, verbose=True):
 
     Parameters
     ----------
-    fname : str | BIDSPath
+    fname : str | mne_bids.BIDSPath
         Filename to save the scans.tsv to.
     overwrite : bool
         Defaults to False.
@@ -450,7 +460,7 @@ def _participants_json(fname, overwrite=False, verbose=True):
     # Note: mne-bids will overwrite age, sex and hand fields
     # if `overwrite` is True
     if op.exists(fname):
-        with open(fname, 'r') as fin:
+        with open(fname, 'r', encoding='utf-8-sig') as fin:
             orig_cols = json.load(fin, object_pairs_hook=OrderedDict)
         for key, val in orig_cols.items():
             if key not in cols:
@@ -464,9 +474,9 @@ def _scans_tsv(raw, raw_fname, fname, overwrite=False, verbose=True):
 
     Parameters
     ----------
-    raw : instance of Raw
+    raw : mne.io.Raw
         The data as MNE-Python Raw object.
-    raw_fname : str | BIDSPath
+    raw_fname : str | mne_bids.BIDSPath
         Relative path to the raw data file.
     fname : str
         Filename to save the scans.tsv to.
@@ -479,25 +489,46 @@ def _scans_tsv(raw, raw_fname, fname, overwrite=False, verbose=True):
         Set verbose output to True or False.
 
     """
-    # get measurement date from the data info
+    # get measurement date in UTC from the data info
     meas_date = raw.info['meas_date']
     if meas_date is None:
         acq_time = 'n/a'
-    elif isinstance(meas_date, (tuple, list, np.ndarray)):  # noqa: E501
+    # The "Z" indicates UTC time
+    elif isinstance(meas_date, (tuple, list, np.ndarray)):  # pragma: no cover
         # for MNE < v0.20
-        acq_time = _stamp_to_dt(meas_date).strftime('%Y-%m-%dT%H:%M:%S')
+        acq_time = _stamp_to_dt(meas_date).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
     elif isinstance(meas_date, datetime):
         # for MNE >= v0.20
-        acq_time = meas_date.strftime('%Y-%m-%dT%H:%M:%S')
+        acq_time = meas_date.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
-    data = OrderedDict([('filename', ['%s' % raw_fname.replace(os.sep, '/')]),
-                        ('acq_time', [acq_time])])
+    # for fif files check whether raw file is likely to be split
+    raw_fnames = [raw_fname]
+    if raw_fname.endswith('.fif'):
+        # check whether fif files were split when saved
+        # use the files in the target directory what should be written
+        # to scans.tsv
+        datatype, basename = raw_fname.split(os.sep)
+        raw_dir = op.join(op.dirname(fname), datatype)
+        raw_files = [f for f in os.listdir(raw_dir) if f.endswith('.fif')]
+        if basename not in raw_files:
+            raw_fnames = []
+            split_base = basename.replace('_meg.fif', '_split-{}')
+            for raw_f in raw_files:
+                if len(raw_f.split('_split-')) == 2:
+                    if split_base.format(raw_f.split('_split-')[1]) == raw_f:
+                        raw_fnames.append(op.join(datatype, raw_f))
+            raw_fnames.sort()
+
+    data = OrderedDict(
+        [('filename', ['{:s}'.format(raw_f.replace(os.sep, '/'))
+          for raw_f in raw_fnames]),
+            ('acq_time', [acq_time] * len(raw_fnames))])
 
     if os.path.exists(fname):
         orig_data = _from_tsv(fname)
         # if the file name is already in the file raise an error
         if raw_fname in orig_data['filename'] and not overwrite:
-            raise FileExistsError(f'"{raw_fname}" already exists in '  # noqa: E501 F821
+            raise FileExistsError(f'"{raw_fname}" already exists in '
                                   f'the scans list. Please set '
                                   f'overwrite to True.')
         # otherwise add the new data
@@ -508,45 +539,114 @@ def _scans_tsv(raw, raw_fname, fname, overwrite=False, verbose=True):
     _write_tsv(fname, data, True, verbose)
 
 
+def _load_image(image, name='image'):
+    if not has_nibabel():  # pragma: no cover
+        raise ImportError('This function requires nibabel.')
+    import nibabel as nib
+    if type(image) not in nib.all_image_classes:
+        try:
+            image = _path_to_str(image)
+        except ValueError:
+            # image -> str conversion in the try block was successful,
+            # so load the file from the specified location. We do this
+            # here to keep the try block as short as possible.
+            raise ValueError('`{}` must be a path to an MRI data '
+                             'file or a nibabel image object, but it '
+                             'is of type "{}"'.format(name, type(image)))
+        else:
+            image = nib.load(image)
+
+    image = nib.Nifti1Image(image.dataobj, image.affine)
+    # XYZT_UNITS = NIFT_UNITS_MM (10 in binary or 2 in decimal)
+    # seems to be the default for Nifti files
+    # https://nifti.nimh.nih.gov/nifti-1/documentation/nifti1fields/nifti1fields_pages/xyzt_units.html
+    if image.header['xyzt_units'] == 0:
+        image.header['xyzt_units'] = np.array(10, dtype='uint8')
+    return image
+
+
 def _meg_landmarks_to_mri_landmarks(meg_landmarks, trans):
     """Convert landmarks from head space to MRI space.
 
     Parameters
     ----------
-    meg_landmarks : array, shape (3, 3)
+    meg_landmarks : np.ndarray, shape (3, 3)
         The meg landmark data: rows LPA, NAS, RPA, columns x, y, z.
-    trans : instance of mne.transforms.Transform
+    trans : mne.transforms.Transform
         The transformation matrix from head coordinates to MRI coordinates.
 
     Returns
     -------
-    mri_landmarks : array, shape (3, 3)
-        The mri ras landmark data converted to from m to mm.
+    mri_landmarks : np.ndarray, shape (3, 3)
+        The mri RAS landmark data converted to from m to mm.
     """
     # Transform MEG landmarks into MRI space, adjust units by * 1e3
     return apply_trans(trans, meg_landmarks, move=True) * 1e3
 
 
 def _mri_landmarks_to_mri_voxels(mri_landmarks, t1_mgh):
-    """Convert landmarks from MRI RAS space to MRI voxel space.
+    """Convert landmarks from MRI surface RAS space to MRI voxel space.
 
     Parameters
     ----------
-    mri_landmarks : array, shape (3, 3)
+    mri_landmarks : np.ndarray, shape (3, 3)
         The MRI RAS landmark data: rows LPA, NAS, RPA, columns x, y, z.
     t1_mgh : nib.MGHImage
         The image data in MGH format.
 
     Returns
     -------
-    mri_landmarks : array, shape (3, 3)
+    vox_landmarks : np.ndarray, shape (3, 3)
         The MRI voxel-space landmark data.
     """
     # Get landmarks in voxel space, using the T1 data
     vox2ras_tkr = t1_mgh.header.get_vox2ras_tkr()
     ras2vox_tkr = linalg.inv(vox2ras_tkr)
-    mri_landmarks = apply_trans(ras2vox_tkr, mri_landmarks)  # in vox
-    return mri_landmarks
+    vox_landmarks = apply_trans(ras2vox_tkr, mri_landmarks)  # in vox
+    return vox_landmarks
+
+
+def _mri_voxels_to_mri_scanner_ras(mri_landmarks, img_mgh):
+    """Convert landmarks from MRI voxel space to MRI scanner RAS space.
+
+    Parameters
+    ----------
+    mri_landmarks : np.ndarray, shape (3, 3)
+        The MRI RAS landmark data: rows LPA, NAS, RPA, columns x, y, z.
+    img_mgh : nib.MGHImage
+        The image data in MGH format.
+
+    Returns
+    -------
+    ras_landmarks : np.ndarray, shape (3, 3)
+        The MRI scanner RAS landmark data.
+    """
+    # Get landmarks in voxel space, using the T1 data
+    vox2ras = img_mgh.header.get_vox2ras()
+    ras_landmarks = apply_trans(vox2ras, mri_landmarks)  # in scanner RAS
+    return ras_landmarks
+
+
+def _mri_scanner_ras_to_mri_voxels(ras_landmarks, img_mgh):
+    """Convert landmarks from MRI scanner RAS space to MRI to MRI voxel space.
+
+    Parameters
+    ----------
+    ras_landmarks : np.ndarray, shape (3, 3)
+        The MRI RAS landmark data: rows LPA, NAS, RPA, columns x, y, z.
+    img_mgh : nib.MGHImage
+        The image data in MGH format.
+
+    Returns
+    -------
+    vox_landmarks : np.ndarray, shape (3, 3)
+        The MRI voxel-space landmark data.
+    """
+    # Get landmarks in voxel space, using the T1 data
+    vox2ras = img_mgh.header.get_vox2ras()
+    ras2vox = linalg.inv(vox2ras)
+    vox_landmarks = apply_trans(ras2vox, ras_landmarks)  # in vox
+    return vox_landmarks
 
 
 def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
@@ -558,14 +658,14 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
 
     Parameters
     ----------
-    raw : instance of Raw
+    raw : mne.io.Raw
         The data as MNE-Python Raw object.
     task : str
         Name of the task the data is based on.
     manufacturer : str
         Manufacturer of the acquisition system. For MEG also used to define the
         coordinate system for the MEG sensors.
-    fname : str | BIDSPath
+    fname : str | mne_bids.BIDSPath
         Filename to save the sidecar json to.
     datatype : str
         Type of the data as in ALLOWED_ELECTROPHYSIO_DATATYPE.
@@ -577,13 +677,20 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
 
     """
     sfreq = raw.info['sfreq']
-    powerlinefrequency = raw.info.get('line_freq', None)
-    if powerlinefrequency is None:
-        raise ValueError("PowerLineFrequency parameter is required "
-                         "in the sidecar files. Please specify it "
-                         "in info['line_freq'] before saving to BIDS "
-                         "(e.g. raw.info['line_freq'] = 60 or with "
-                         "--line_freq option in the command line.).")
+    try:
+        powerlinefrequency = raw.info['line_freq']
+        powerlinefrequency = ('n/a' if powerlinefrequency is None else
+                              powerlinefrequency)
+    except KeyError:
+        raise ValueError(
+            "PowerLineFrequency parameter is required in the sidecar files. "
+            "Please specify it in info['line_freq'] before saving to BIDS, "
+            "e.g. by running: "
+            "    raw.info['line_freq'] = 60"
+            "in your script, or by passing: "
+            "    --line_freq 60 "
+            "in the command line for a 60 Hz line frequency. If the frequency "
+            "is unknown, set it to None")
 
     if isinstance(raw, BaseRaw):
         rec_type = 'continuous'
@@ -676,12 +783,12 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
     return fname
 
 
-def _deface(t1w, mri_landmarks, deface):
+def _deface(image, landmarks, deface):
     if not has_nibabel():  # pragma: no cover
         raise ImportError('This function requires nibabel.')
     import nibabel as nib
 
-    inset, theta = (20, 35.)
+    inset, theta = (5, 15.)
     if isinstance(deface, dict):
         if 'inset' in deface:
             inset = deface['inset']
@@ -700,44 +807,40 @@ def _deface(t1w, mri_landmarks, deface):
         raise ValueError('inset should be positive, '
                          'Got %s' % inset)
 
-    if not 0 < theta < 90:
+    if not 0 <= theta < 90:
         raise ValueError('theta should be between 0 and 90 '
                          'degrees. Got %s' % theta)
 
-    # x: L/R L+, y: S/I I+, z: A/P A+
-    t1w_data = t1w.get_fdata().copy()
-    idxs_vox = np.meshgrid(np.arange(t1w_data.shape[0]),
-                           np.arange(t1w_data.shape[1]),
-                           np.arange(t1w_data.shape[2]),
-                           indexing='ij')
-    idxs_vox = np.array(idxs_vox)  # (3, *t1w_data.shape)
-    idxs_vox = np.transpose(idxs_vox,
-                            [1, 2, 3, 0])  # (*t1w_data.shape, 3)
-    idxs_vox = idxs_vox.reshape(-1, 3)  # (n_voxels, 3)
+    # get image data, make a copy
+    image_data = image.get_fdata().copy()
 
-    mri_landmarks_ras = apply_trans(t1w.affine, mri_landmarks)
-    ras_meg_t = \
-        get_ras_to_neuromag_trans(*mri_landmarks_ras[[1, 0, 2]])
+    # make indices to move around so that the image doesn't have to
+    idxs = np.meshgrid(np.arange(image_data.shape[0]),
+                       np.arange(image_data.shape[1]),
+                       np.arange(image_data.shape[2]),
+                       indexing='ij')
+    idxs = np.array(idxs)  # (3, *image_data.shape)
+    idxs = np.transpose(idxs, [1, 2, 3, 0])  # (*image_data.shape, 3)
+    idxs = idxs.reshape(-1, 3)  # (n_voxels, 3)
 
-    idxs_ras = apply_trans(t1w.affine, idxs_vox)
-    idxs_meg = apply_trans(ras_meg_t, idxs_ras)
+    # convert to RAS by applying affine
+    idxs = nib.affines.apply_affine(image.affine, idxs)
 
     # now comes the actual defacing
     # 1. move center of voxels to (nasion - inset)
-    # 2. rotate the head by theta from the normal to the plane passing
-    # through anatomical coordinates
-    trans_y = -mri_landmarks_ras[1, 1] + inset
-    idxs_meg = apply_trans(translation(y=trans_y), idxs_meg)
-    idxs_meg = apply_trans(rotation(x=-np.deg2rad(theta)), idxs_meg)
-    coords = idxs_meg.reshape(t1w.shape + (3,))  # (*t1w_data.shape, 3)
-    mask = (coords[..., 2] < 0)   # z < 0
+    # 2. rotate the head by theta from vertical
+    x, y, z = nib.affines.apply_affine(image.affine, landmarks)[1]
+    idxs = apply_trans(translation(x=-x, y=-y + inset, z=-z), idxs)
+    idxs = apply_trans(rotation(x=-np.pi / 2 + np.deg2rad(theta)), idxs)
+    idxs = idxs.reshape(image_data.shape + (3,))
+    mask = (idxs[..., 2] < 0)  # z < middle
+    image_data[mask] = 0.
 
-    t1w_data[mask] = 0.
     # smooth decided against for potential lack of anonymizaton
     # https://gist.github.com/alexrockhill/15043928b716a432db3a84a050b241ae
 
-    t1w = nib.Nifti1Image(t1w_data, t1w.affine, t1w.header)
-    return t1w
+    image = nib.Nifti1Image(image_data, image.affine, image.header)
+    return image
 
 
 def _write_raw_fif(raw, bids_fname):
@@ -747,18 +850,13 @@ def _write_raw_fif(raw, bids_fname):
     ----------
     raw : mne.io.Raw
         Raw file to save out.
-    bids_fname : str | BIDSPath
+    bids_fname : str | mne_bids.BIDSPath
         The name of the BIDS-specified file where the raw object
         should be saved.
 
     """
-    n_rawfiles = len(raw.filenames)
-    if n_rawfiles > 1:
-        split_naming = 'bids'
-        raw.save(bids_fname, split_naming=split_naming, overwrite=True)
-    else:
-        # This ensures that single FIF files do not have the split param
-        raw.save(bids_fname, split_naming='neuromag', overwrite=True)
+    raw.save(bids_fname, fmt=raw.orig_format, split_naming='bids',
+             overwrite=True)
 
 
 def _write_raw_brainvision(raw, bids_fname, events):
@@ -775,9 +873,9 @@ def _write_raw_brainvision(raw, bids_fname, events):
         The events as MNE-Python format ndaray.
 
     """
-    if not check_version('pybv', '0.2'):
-        raise ImportError('pybv >=0.2.0 is required for converting '
-                          'file to Brainvision format')
+    if not check_version('pybv', '0.4'):  # pragma: no cover
+        raise ImportError('pybv >=0.4 is required for converting '
+                          'file to BrainVision format')
     from pybv import write_brainvision
     # Subtract raw.first_samp because brainvision marks events starting from
     # the first available data point and ignores the raw.first_samp
@@ -787,12 +885,39 @@ def _write_raw_brainvision(raw, bids_fname, events):
     meas_date = raw.info['meas_date']
     if meas_date is not None:
         meas_date = _stamp_to_dt(meas_date)
-    write_brainvision(data=raw.get_data(), sfreq=raw.info['sfreq'],
+
+    # pybv needs to know the units of the data for appropriate scaling
+    # get voltage units as micro-volts and all other units "as is"
+    unit = []
+    for chs in raw.info['chs']:
+        if chs['unit'] == FIFF.FIFF_UNIT_V:
+            unit.append('µV')
+        else:
+            unit.append(_unit2human.get(chs['unit'], 'n/a'))
+            unit = [u if u not in ['NA'] else 'n/a' for u in unit]
+
+    # We enforce conversion to float32 format
+    # XXX: pybv can also write to int16, to do that, we need to get
+    # original units of data prior to conversion, and add an optimization
+    # function to pybv that maximizes the resolution parameter while
+    # ensuring that int16 can represent the data in original units.
+    if raw.orig_format != 'single':
+        warn(f'Encountered data in "{raw.orig_format}" format. '
+             f'Converting to float32.', RuntimeWarning)
+
+    # Writing to float32 µV with 0.1 resolution are the pybv defaults,
+    # which guarantees accurate roundtrip for values >= 1e-7 µV
+    fmt = 'binary_float32'
+    resolution = 1e-1
+    write_brainvision(data=raw.get_data(),
+                      sfreq=raw.info['sfreq'],
                       ch_names=raw.ch_names,
                       fname_base=op.splitext(op.basename(bids_fname))[0],
                       folder_out=op.dirname(bids_fname),
                       events=events,
-                      resolution=1e-9,
+                      resolution=resolution,
+                      unit=unit,
+                      fmt=fmt,
                       meas_date=meas_date)
 
 
@@ -875,7 +1000,7 @@ def make_dataset_description(path, name, data_license=None,
                                ('ReferencesAndLinks', references_and_links),
                                ('DatasetDOI', doi)])
     if op.isfile(fname):
-        with open(fname, 'r') as fin:
+        with open(fname, 'r', encoding='utf-8-sig') as fin:
             orig_cols = json.load(fin)
         if 'BIDSVersion' in orig_cols and \
                 orig_cols['BIDSVersion'] != BIDS_VERSION:
@@ -900,6 +1025,7 @@ def make_dataset_description(path, name, data_license=None,
 
 def write_raw_bids(raw, bids_path, events_data=None,
                    event_id=None, anonymize=None,
+                   format='auto',
                    overwrite=False, verbose=True):
     """Save raw data to a BIDS-compliant folder structure.
 
@@ -907,8 +1033,8 @@ def write_raw_bids(raw, bids_path, events_data=None,
                    file format is BIDS-supported for that datatype. Otherwise,
                    this function will convert to a BIDS-supported file format
                    while warning the user. For EEG and iEEG data, conversion
-                   will be to BrainVision format, for MEG conversion will be
-                   to FIF.
+                   will be to BrainVision format; for MEG, conversion will be
+                   to FIFF.
 
                  * ``mne-bids`` will infer the manufacturer information
                    from the file extension. If your file format is non-standard
@@ -917,11 +1043,11 @@ def write_raw_bids(raw, bids_path, events_data=None,
 
     Parameters
     ----------
-    raw : instance of mne.io.Raw
+    raw : mne.io.Raw
         The raw data. It must be an instance of `mne.io.Raw`. The data
         should not be loaded from disk, i.e., ``raw.preload`` must be
         ``False``.
-    bids_path : BIDSPath
+    bids_path : mne_bids.BIDSPath
         The file to write. The `mne_bids.BIDSPath` instance passed here
         **must** have the ``.root`` attribute set. If the ``.datatype``
         attribute is not set, it will be inferred from the recording data type
@@ -929,14 +1055,15 @@ def write_raw_bids(raw, bids_path, events_data=None,
         Example::
 
             bids_path = BIDSPath(subject='01', session='01', task='testing',
-                                 acquisition='01', run='01', root='/data/BIDS')
+                                 acquisition='01', run='01', datatype='meg',
+                                 root='/data/BIDS')
 
         This will write the following files in the correct subfolder ``root``::
 
             sub-01_ses-01_task-testing_acq-01_run-01_meg.fif
             sub-01_ses-01_task-testing_acq-01_run-01_meg.json
             sub-01_ses-01_task-testing_acq-01_run-01_channels.tsv
-            sub-01_ses-01_task-testing_acq-01_run-01_coordsystem.json
+            sub-01_ses-01_acq-01_coordsystem.json
 
         and the following one if ``events_data`` is not ``None``::
 
@@ -950,15 +1077,37 @@ def write_raw_bids(raw, bids_path, events_data=None,
         Note that the data type is automatically inferred from the raw
         object, as well as the extension. Data with MEG and other
         electrophysiology data in the same file will be stored as ``'meg'``.
-    events_data : str | pathlib.Path | array | None
-        The events file. If a string or a Path object, specifies the path of
-        the events file. If an array, the MNE events array
-        (shape: ``(n_events, 3)``).
-        If ``None``, events will be inferred from the stim channel using
-        `mne.find_events`.
+    events_data : path-like | np.ndarray | None
+        Use this parameter to specify events to write to the ``*_events.tsv``
+        sidecar file, additionally to the object's `mne.Annotations` (which
+        are always written).
+        If a path, specifies the location of an MNE events file.
+        If an array, the MNE events array (shape: ``(n_events, 3)``).
+        If a path or an array and ``raw.annotations`` exist, the union of
+        ``event_data`` and ``raw.annotations`` will be written.
+        Corresponding descriptions for all event IDs (listed in the third
+        column of the MNE events array) must be specified via the ``event_id``
+        parameter; otherwise, an exception is raised.
+        If ``None``, events will only be inferred from the the raw object's
+        `mne.Annotations`.
+
+        .. note::
+           If ``not None``, writes the union of ``events_data`` and
+           ``raw.annotations``. If you wish to **only** write
+           ``raw.annotations``, pass ``events_data=None``. If you want to
+           **exclude** the events in ``raw.annotations`` from being written,
+           call ``raw.set_annotations(None)`` before invoking this function.
+
+        .. note::
+           Descriptions of all event IDs must be specified via the ``event_id``
+           parameter.
+
     event_id : dict | None
-        The event ID dictionary used to create a `trial_type` column in
-        ``*_events.tsv``.
+        Descriptions of all event IDs, if you passed ``events_data``.
+        The descriptions will be written to the ``trial_type`` column in
+        ``*_events.tsv``. The dictionary keys correspond to the event
+        descriptions and the values to the event IDs. You must specify a
+        description for all event IDs in ``events_data``.
     anonymize : dict | None
         If `None` (default), no anonymization is performed.
         If a dictionary, data will be anonymized depending on the dictionary
@@ -977,6 +1126,14 @@ def write_raw_bids(raw, bids_path, events_data=None,
             recording date will be overwritten as well. If True, keep subject
             information apart from the recording date.
 
+    format : 'auto' | 'BrainVision' | 'FIF'
+        Controls the file format of the data after BIDS conversion. If
+        ``'auto'``, MNE-BIDS will attempt to convert the input data to BIDS
+        without a change of the original file format. A conversion to a
+        different file format (BrainVision, or FIF) will only take place when
+        the original file format lacks some necessary features. When a str is
+        passed, a conversion can be forced to the BrainVision format for EEG,
+        or the FIF format for MEG data.
     overwrite : bool
         Whether to overwrite existing files or data in files.
         Defaults to ``False``.
@@ -996,30 +1153,46 @@ def write_raw_bids(raw, bids_path, events_data=None,
 
     Returns
     -------
-    bids_path : BIDSPath
-        The modified path to the file written, including the root of the
-        BIDS-compatible folder in ``bids_path.root``.
+    bids_path : mne_bids.BIDSPath
+        The path of the created data file.
 
     Notes
     -----
-    For the ``*_participants.tsv`` file, ``raw.info['subject_info']`` should be
-    updated and ``raw.info['meas_date']`` should not be ``None`` to allow
-    computation of each participant's age correctly.
+    You should ensure that ``raw.info['subject_info']`` and
+    ``raw.info['meas_date']`` are set to proper (not-``None``) values to allow
+    for the correct computation of each participant's age when creating
+    ``*_participants.tsv``.
+
+    This function will convert existing `mne.Annotations` from
+    ``raw.annotations`` to events. Additionally, any events supplied via
+    ``events_data`` will be written too. To avoid writing of annotations,
+    remove them from the raw file via ``raw.set_annotations(None)`` before
+    invoking ``write_raw_bids``.
+
+    To write events encoded in a ``STIM`` channel, you first need to create the
+    events array manually and pass it to this function:
+
+    ..
+        events = mne.find_events(raw, min_duration=0.002)
+        write_raw_bids(..., events_data=events)
+
+    See the documentation of `mne.find_events` for more information on event
+    extraction from ``STIM`` channels.
+
+    When anonymizing ``.edf`` files, then the file format for EDF limits
+    how far back we can set the recording date. Therefore, all anonymized
+    EDF datasets will have an internal recording date of ``01-01-1985``,
+    and the actual recording date will be stored in the ``scans.tsv``
+    file's ``acq_time`` column.
 
     See Also
     --------
     mne.io.Raw.anonymize
+    mne.find_events
+    mne.Annotations
+    mne.events_from_annotations
 
     """
-    if not check_version('mne', '0.17'):
-        raise ValueError('Your version of MNE is too old. '
-                         'Please update to 0.17 or newer.')
-
-    if not check_version('mne', '0.20') and anonymize:
-        raise ValueError('Your version of MNE is too old to be able to '
-                         'anonymize the data on write. Please update to '
-                         '0.20.dev version or newer.')
-
     if not isinstance(raw, BaseRaw):
         raise ValueError('raw_file must be an instance of BaseRaw, '
                          'got %s' % type(raw))
@@ -1035,11 +1208,23 @@ def write_raw_bids(raw, bids_path, events_data=None,
         raise RuntimeError('"bids_path" must be a BIDSPath object. Please '
                            'instantiate using mne_bids.BIDSPath().')
 
+    _validate_type(events_data, types=('path-like', np.ndarray, None),
+                   item_name='events_data',
+                   type_name='path-like, NumPy array, or None')
+
     # Check if the root is available
     if bids_path.root is None:
         raise ValueError('The root of the "bids_path" must be set. '
                          'Please use `bids_path.update(root="<root>")` '
                          'to set the root of the BIDS folder to read.')
+
+    if events_data is not None and event_id is None:
+        raise RuntimeError('You passed events_data, but no event_id '
+                           'dictionary. You need to pass both, or neither.')
+
+    if event_id is not None and events_data is None:
+        raise RuntimeError('You passed event_id, but no events_data NumPy '
+                           'array. You need to pass both, or neither.')
 
     raw = raw.copy()
 
@@ -1056,12 +1241,25 @@ def write_raw_bids(raw, bids_path, events_data=None,
         raise ValueError(f'Unrecognized file format {ext}')
 
     raw_orig = reader[ext](**raw._init_kwargs)
-    assert_array_equal(raw.times, raw_orig.times,
-                       "raw.times should not have changed since reading"
-                       " in from the file. It may have been cropped.")
+    if not np.array_equal(raw.times, raw_orig.times):
+        if len(raw.times) == len(raw_orig.times):
+            msg = ("raw.times has changed since reading from disk, but "
+                   "write_raw_bids() doesn't allow writing modified data.")
+        else:
+            msg = ("The raw data you want to write contains {comp} time "
+                   "points than the raw data on disk. It is possible that you "
+                   "{guess} your data, which write_raw_bids() won't accept.")
+            if len(raw.times) < len(raw_orig.times):
+                msg = msg.format(comp='fewer', guess='cropped')
+            elif len(raw.times) > len(raw_orig.times):
+                msg = msg.format(comp='more', guess='concatenated')
+
+        msg += (' If you believe you have a valid use case that should be '
+                'supported, please reach out to the developers at '
+                'https://github.com/mne-tools/mne-bids/issues')
+        raise ValueError(msg)
 
     datatype = _handle_datatype(raw)
-
     bids_path = bids_path.copy()
     bids_path = bids_path.update(
         datatype=datatype, suffix=datatype, extension=ext)
@@ -1081,6 +1279,10 @@ def write_raw_bids(raw, bids_path, events_data=None,
             if er_date != bids_path.session:
                 raise ValueError("Date provided for session doesn't match "
                                  "session date.")
+            if anonymize is not None and 'daysback' in anonymize:
+                meas_date = meas_date - timedelta(anonymize['daysback'])
+                session = meas_date.strftime('%Y%m%d')
+                bids_path = bids_path.copy().update(session=session)
 
     data_path = bids_path.mkdir().directory
 
@@ -1100,10 +1302,6 @@ def write_raw_bids(raw, bids_path, events_data=None,
     coordsystem_path = session_path.copy().update(
         acquisition=bids_path.acquisition, space=bids_path.space,
         datatype=bids_path.datatype, suffix='coordsystem', extension='.json')
-
-    # create *_electrodes.tsv
-    electrodes_path = bids_path.copy().update(
-        suffix='electrodes', extension='.tsv')
 
     # For the remaining files, we can use BIDSPath to alter.
     readme_fname = op.join(bids_path.root, 'README')
@@ -1129,11 +1327,13 @@ def write_raw_bids(raw, bids_path, events_data=None,
                 warn('Converting to FIF for anonymization')
             convert = True
             bids_path.update(extension='.fif')
-        elif bids_path.datatype in ['eeg', 'ieeg'] and ext != '.vhdr':
-            if verbose:
-                warn('Converting to BV for anonymization')
-            convert = True
-            bids_path.update(extension='.vhdr')
+        elif bids_path.datatype in ['eeg', 'ieeg']:
+            if ext not in ['.vhdr', '.edf', '.bdf']:
+                if verbose:
+                    warn('Converting data files to BrainVision format '
+                         'for anonymization')
+                convert = True
+                bids_path.update(extension='.vhdr')
 
     # Read in Raw object and extract metadata from Raw object if needed
     orient = ORIENTATION.get(ext, 'n/a')
@@ -1155,22 +1355,32 @@ def write_raw_bids(raw, bids_path, events_data=None,
         _coordsystem_json(raw, unit, orient, manufacturer,
                           coordsystem_path.fpath, bids_path.datatype,
                           overwrite, verbose)
-    elif bids_path.datatype in ['eeg', 'ieeg', 'nirs']:
+
+        _write_coordsystem_json(raw=raw, unit=unit, hpi_coord_system=orient,
+                                sensor_coord_system=orient,
+                                fname=coordsystem_path.fpath,
+                                datatype=bids_path.datatype,
+                                overwrite=overwrite, verbose=verbose)
+elif bids_path.datatype in ['eeg', 'ieeg', 'nirs']:
         # We only write electrodes.tsv and accompanying coordsystem.json
         # if we have an available DigMontage
         if raw.info['dig'] is not None and raw.info['dig']:
-            _write_dig_bids(electrodes_path.fpath, coordsystem_path.fpath,
-                            bids_path.root, raw, bids_path.datatype,
-                            overwrite, verbose)
+            _write_dig_bids(bids_path, raw, overwrite, verbose)
     else:
         logger.warning(f'Writing of electrodes.tsv is not supported '
                        f'for data type "{bids_path.datatype}". Skipping ...')
 
-    events, event_id = _read_events(events_data, event_id, raw, ext,
-                                    verbose=verbose)
-    if events is not None and len(events) > 0 and not emptyroom:
-        _events_tsv(events, raw, events_path.fpath, event_id,
-                    overwrite, verbose)
+    # Write events.
+    if not emptyroom:
+        events_array, event_dur, event_desc_id_map = _read_events(
+            events_data, event_id, raw, verbose=False
+        )
+        if events_array.size != 0:
+            _events_tsv(events=events_array, durations=event_dur, raw=raw,
+                        fname=events_path.fpath, trial_type=event_desc_id_map,
+                        overwrite=overwrite, verbose=verbose)
+        # Kepp events_array around for BrainVision writing below.
+        del event_desc_id_map, events_data, event_id, event_dur
 
     make_dataset_description(bids_path.root, name=" ", overwrite=overwrite,
                              verbose=verbose)
@@ -1195,13 +1405,34 @@ def write_raw_bids(raw, bids_path, events_data=None,
     if not convert:
         convert = ext not in ALLOWED_DATATYPE_EXTENSIONS[bids_path.datatype]
 
+    # check if there is an BIDS-unsupported MEG format
     if bids_path.datatype == 'meg' and convert and not anonymize:
-        raise ValueError(f"Got file extension {convert} for MEG data, "
-                         f"expected one of "
-                         f"{ALLOWED_DATATYPE_EXTENSIONS['meg']}")
+        raise ValueError(
+            f"Got file extension {convert} for MEG data, "
+            f"expected one of "
+            f"{', '.join(sorted(ALLOWED_DATATYPE_EXTENSIONS['meg']))}")
 
     if not convert and verbose:
         print('Copying data files to %s' % bids_path.fpath.name)
+
+    # If users desire a certain format, will handle auto-conversion
+    if format != 'auto':
+        if format == 'BrainVision' and bids_path.datatype in ['ieeg', 'eeg']:
+            convert = True
+            bids_path.update(extension='.vhdr')
+        elif format == 'FIF' and bids_path.datatype == 'meg':
+            convert = True
+            bids_path.update(extension='.fif')
+        elif all(format not in values for values in CONVERT_FORMATS.values()):
+            raise ValueError(f'The input "format" {format} is not an '
+                             f'accepted input format for `write_raw_bids`. '
+                             f'Please use one of {CONVERT_FORMATS[datatype]} '
+                             f'for {datatype} datatype.')
+        elif format not in CONVERT_FORMATS[datatype]:
+            raise ValueError(f'The input "format" {format} is not an '
+                             f'accepted input format for {datatype} datatype. '
+                             f'Please use one of {CONVERT_FORMATS[datatype]} '
+                             f'for {datatype} datatype.')
 
     # File saving branching logic
     if convert:
@@ -1213,7 +1444,8 @@ def write_raw_bids(raw, bids_path, events_data=None,
             if verbose:
                 warn('Converting data files to BrainVision format')
             bids_path.update(suffix=bids_path.datatype, extension='.vhdr')
-            _write_raw_brainvision(raw, bids_path.fpath, events)
+            # XXX Should we write durations here too?
+            _write_raw_brainvision(raw, bids_path.fpath, events=events_array)
     elif ext == '.fif':
         _write_raw_fif(raw, bids_path)
     # CTF data is saved and renamed in a directory
@@ -1222,6 +1454,14 @@ def write_raw_bids(raw, bids_path, events_data=None,
     # BrainVision is multifile, copy over all of them and fix pointers
     elif ext == '.vhdr':
         copyfile_brainvision(raw_fname, bids_path, anonymize=anonymize)
+    elif ext in ['.edf', '.bdf']:
+        if anonymize is not None:
+            warn("EDF/EDF+/BDF files contain two fields for recording dates."
+                 "Due to file format limitations, one of these fields only "
+                 "supports 2-digit years. The date for that field will be "
+                 "set to 85 (i.e., 1985), the earliest possible date. "
+                 "The true anonymized date is stored in the scans.tsv file.")
+        copyfile_edf(raw_fname, bids_path, anonymize=anonymize)
     # EEGLAB .set might be accompanied by a .fdt - find out and copy it too
     elif ext == '.set':
         copyfile_eeglab(raw_fname, bids_path)
@@ -1234,7 +1474,7 @@ def write_raw_bids(raw, bids_path, events_data=None,
                      bids_path.session, bids_path.task, bids_path.run,
                      raw._init_kwargs)
     else:
-        sh.copyfile(raw_fname, bids_path)
+        shutil.copyfile(raw_fname, bids_path)
 
     # write to the scans.tsv file the output file written
     scan_relative_fpath = op.join(bids_path.datatype, bids_path.fpath.name)
@@ -1245,52 +1485,53 @@ def write_raw_bids(raw, bids_path, events_data=None,
     return bids_path
 
 
-def write_anat(root, subject, t1w, session=None, acquisition=None,
-               raw=None, trans=None, landmarks=None, deface=False,
-               overwrite=False, verbose=False):
+def write_anat(image, bids_path, raw=None, trans=None, landmarks=None,
+               t1w=None, deface=False, overwrite=False, verbose=False):
     """Put anatomical MRI data into a BIDS format.
 
-    Given a BIDS directory and a T1 weighted MRI scan for a certain subject,
-    format the MRI scan to be in BIDS format and put it into the correct
-    location in the bids_dir. If a transformation matrix is supplied, a
-    sidecar JSON file will be written for the T1 weighted data.
+    Given an MRI scan, format and store the MR data according to BIDS in the
+    correct location inside the specified :class:`mne_bids.BIDSPath`. If a
+    transformation matrix is supplied, this information will be stored in a
+    sidecar JSON file.
 
     Parameters
     ----------
-    root : str | pathlib.Path
-        Path to root of the BIDS folder
-    subject : str
-        Subject label as in 'sub-<label>', for example: '01'
-    t1w : str | pathlib.Path | nibabel image object
-        Path to a T1 weighted MRI scan of the subject. Can be in any format
-        readable by nibabel. Can also be a nibabel image object of a T1
-        weighted MRI scan. Will be written as a .nii.gz file.
-    session : str | None
-        The session for `t1w`. Corresponds to "ses"
-    acquisition: str | None
-        The acquisition parameters for `t1w`. Corresponds to "acq"
-    raw : instance of Raw | None
-        The raw data of `subject` corresponding to `t1w`. If `raw` is None,
-        `trans` has to be None as well
-    trans : instance of mne.transforms.Transform | str | None
-        The transformation matrix from head coordinates to MRI coordinates. Can
-        also be a string pointing to a .trans file containing the
-        transformation matrix. If None, no sidecar JSON file will be written
-        for `t1w`
+    image : str | pathlib.Path | NibabelImageObject
+        Path to an MRI scan (e.g. T1w) of the subject. Can be in any format
+        readable by nibabel. Can also be a nibabel image object of an
+        MRI scan. Will be written as a .nii.gz file.
+    bids_path : mne_bids.BIDSPath
+        The file to write. The `mne_bids.BIDSPath` instance passed here
+        **must** have the ``root`` and ``subject`` attributes set.
+        The suffix is assumed to be ``'T1w'`` if not present. It can
+        also be ``'FLASH'``, for example, to indicate FLASH MRI.
+    raw : mne.io.Raw | None
+        The raw data of ``subject`` corresponding to the MR scan in ``image``.
+        If ``None``, ``trans`` has to be ``None`` as well
+    trans : mne.transforms.Transform | str | None
+        The transformation matrix from head to MRI coordinates. Can
+        also be a string pointing to a ``.trans`` file containing the
+        transformation matrix. If ``None``, no sidecar JSON file will be
+        created.
+    t1w : str | pathlib.Path | NibabelImageObject | None
+        This parameter is useful if image written is not already a T1 image.
+        If the image written is to have a sidecar or be defaced,
+        this can be done using `raw`, `trans` and `t1w`. The T1 must be
+        passed here because the coregistration uses freesurfer surfaces which
+        are in T1 space.
     deface : bool | dict
         If False, no defacing is performed.
         If True, deface with default parameters.
         `trans` and `raw` must not be `None` if True.
         If dict, accepts the following keys:
 
-        - `inset`: how far back in millimeters to start defacing
-          relative to the nasion (default 20)
+        - `inset`: how far back in voxels to start defacing
+          relative to the nasion (default 5)
 
         - `theta`: is the angle of the defacing shear in degrees relative
-          to the normal to the plane passing through the anatomical
-          landmarks (default 35).
+          to vertical (default 15).
 
-    landmarks: instance of DigMontage | str
+    landmarks: mne.channels.DigMontage | str | None
         The DigMontage or filepath to a DigMontage with landmarks that can be
         passed to provide information for defacing. Landmarks can be determined
         from the head model using `mne coreg` GUI, or they can be determined
@@ -1305,147 +1546,167 @@ def write_anat(root, subject, t1w, session=None, acquisition=None,
         If overwrite is False, no existing data will be overwritten or
         replaced.
     verbose : bool
-        If verbose is True, this will print a snippet of the sidecar files. If
-        False, no content will be printed.
+        If ``True``, this will print a snippet of the sidecar files. If
+        ``False``, no content will be printed.
 
     Returns
     -------
-    anat_dir : str
-        Path to the anatomical scan in the `bids_dir`
-
+    bids_path : mne_bids.BIDSPath
+        Path to the written MRI data.
     """
     if not has_nibabel():  # pragma: no cover
         raise ImportError('This function requires nibabel.')
     import nibabel as nib
 
-    if deface and (trans is None or raw is None) and landmarks is None:
-        raise ValueError('The raw object, trans and raw or the landmarks '
-                         'must be provided to deface the T1')
+    write_sidecar = trans is not None or landmarks is not None
 
-    # Make directory for anatomical data
-    anat_dir = op.join(root, 'sub-{}'.format(subject))
-    # Session is optional
-    if session is not None:
-        anat_dir = op.join(anat_dir, 'ses-{}'.format(session))
-    anat_dir = op.join(anat_dir, 'anat')
-    if not op.exists(anat_dir):
-        os.makedirs(anat_dir)
+    if not write_sidecar and raw is not None:
+        warn('Ignoring `raw` keyword argument, `trans`, `landmarks` '
+             'or both (if landmarks are in head space) are needed '
+             'to write the sidecar file')
 
-    # Try to read our T1 file and convert to MGH representation
-    try:
-        t1w = _path_to_str(t1w)
-    except ValueError:
-        # t1w -> str conversion failed, so maybe the user passed an nibabel
-        # object instead of a path.
-        if type(t1w) not in nib.all_image_classes:
-            raise ValueError('`t1w` must be a path to a T1 weighted MRI data '
-                             'file , or a nibabel image object, but it is of '
-                             'type "{}"'.format(type(t1w)))
-    else:
-        # t1w -> str conversion in the try block was successful, so load the
-        # file from the specified location. We do this here and not in the try
-        # block to keep the try block as short as possible.
-        t1w = nib.load(t1w)
+    if deface and not write_sidecar:
+        raise ValueError('Either `raw` and `trans` must be provided '
+                         'or `landmarks` must be provided to deface '
+                         'the image')
 
-    t1w = nib.Nifti1Image(t1w.dataobj, t1w.affine)
-    # XYZT_UNITS = NIFT_UNITS_MM (10 in binary or 2 in decimal)
-    # seems to be the default for Nifti files
-    # https://nifti.nimh.nih.gov/nifti-1/documentation/nifti1fields/nifti1fields_pages/xyzt_units.html
-    if t1w.header['xyzt_units'] == 0:
-        t1w.header['xyzt_units'] = np.array(10, dtype='uint8')
+    # Check if the root is available
+    if bids_path.root is None:
+        raise ValueError('The root of the "bids_path" must be set. '
+                         'Please use `bids_path.update(root="<root>")` '
+                         'to set the root of the BIDS folder to read.')
+    # create a copy
+    bids_path = bids_path.copy()
 
-    # Now give the NIfTI file a BIDS name and write it to the BIDS location
-    # this needs to be a string, since nibabel assumes a string input
-    t1w_basename = BIDSPath(subject=subject, session=session,
-                            acquisition=acquisition,
-                            root=root,
-                            suffix='T1w', extension='.nii.gz')
+    # BIDS demands anatomical scans have no task associated with them
+    bids_path.update(task=None)
+
+    # XXX For now, only support writing a single run.
+    bids_path.update(run=None)
+
+    # this file is anat
+    if bids_path.datatype is None:
+        bids_path.update(datatype='anat')
+
+    # default to T1w
+    if not bids_path.suffix:
+        bids_path.update(suffix='T1w')
+
+    #  data is compressed Nifti
+    bids_path.update(extension='.nii.gz')
+
+    # create the directory for the MRI data
+    bids_path.directory.mkdir(exist_ok=True, parents=True)
+
+    # Try to read our MRI file and convert to MGH representation
+    image_nii = _load_image(image)
 
     # Check if we have necessary conditions for writing a sidecar JSON
-    if trans is not None or landmarks is not None:
-        t1_mgh = nib.MGHImage(t1w.dataobj, t1w.affine)
+    if write_sidecar:
+        # Get landmarks and their coordinate frame
+        if landmarks is not None and raw is not None:
+            raise ValueError('Please use either `landmarks` or `raw`, '
+                             'which digitization to use is ambiguous.')
 
-        if landmarks is not None:
-            if raw is not None:
-                raise ValueError('Please use either `landmarks` or `raw`, '
-                                 'which digitization to use is ambiguous.')
-            if isinstance(landmarks, str):
-                landmarks, coord_frame = read_fiducials(landmarks)
-                landmarks = np.array([landmark['r'] for landmark in
-                                      landmarks], dtype=float)  # unpack
-            else:
-                coords_dict, coord_frame = _get_fid_coords(landmarks.dig)
-                landmarks = np.asarray((coords_dict['lpa'],
-                                        coords_dict['nasion'],
-                                        coords_dict['rpa']))
+        if trans is not None:
+            # get trans and ensure it is from head to MRI
+            trans, _ = _get_trans(trans, fro='head', to='mri')
+
+            if landmarks is None and not isinstance(raw, BaseRaw):
+                raise ValueError('`raw` must be specified if `trans` '
+                                 'is not None')
+
+        if isinstance(landmarks, str):
+            landmarks, coord_frame = read_fiducials(landmarks)
+            landmarks = np.array([landmark['r'] for landmark in
+                                  landmarks], dtype=float)  # unpack
+        else:
+            # Prepare to write the sidecar JSON, extract MEG landmarks
+            coords_dict, coord_frame = _get_fid_coords(
+                landmarks.dig if raw is None else raw.info['dig'])
+            landmarks = np.asarray((coords_dict['lpa'],
+                                    coords_dict['nasion'],
+                                    coords_dict['rpa']))
+
+        # check if coord frame is supported
+        if coord_frame not in (FIFF.FIFFV_COORD_HEAD, FIFF.FIFFV_COORD_MRI,
+                               FIFF.FIFFV_MNE_COORD_MRI_VOXEL,
+                               FIFF.FIFFV_MNE_COORD_RAS):
+            raise ValueError('Coordinate frame not recognized, '
+                             f'found {coord_frame}')
+
+        # If the `coord_frame` isn't in head space, we don't need the `trans`
+        if coord_frame != FIFF.FIFFV_COORD_HEAD and trans is not None:
+            raise ValueError('`trans` was provided but `landmark` data is '
+                             'in mri space. Please use only one of these.')
+
+        if coord_frame in (FIFF.FIFFV_COORD_HEAD, FIFF.FIFFV_COORD_MRI) \
+                and bids_path.suffix != 'T1w' and t1w is None:
+            raise ValueError('The T1 must be passed as `t1w` or `landmarks` '
+                             'must be passed in `mri_voxel` or `ras` (scanner '
+                             'RAS) coordinate frames for non T1-images')
+
+        if coord_frame != FIFF.FIFFV_MNE_COORD_MRI_VOXEL:
+            # Make MGH image for header properties
+            img_mgh = nib.MGHImage(image_nii.dataobj, image_nii.affine)
+
             if coord_frame == FIFF.FIFFV_COORD_HEAD:
                 if trans is None:
                     raise ValueError('Head space landmarks provided, '
                                      '`trans` required')
-                mri_landmarks = _meg_landmarks_to_mri_landmarks(
+
+                landmarks = _meg_landmarks_to_mri_landmarks(
                     landmarks, trans)
-                mri_landmarks = _mri_landmarks_to_mri_voxels(
-                    mri_landmarks, t1_mgh)
-            elif coord_frame in (FIFF.FIFFV_MNE_COORD_MRI_VOXEL,
-                                 FIFF.FIFFV_COORD_MRI):
-                if trans is not None:
-                    raise ValueError('`trans` was provided but `landmark` '
-                                     'data is in mri space. Please use '
-                                     'only one of these.')
-                if coord_frame == FIFF.FIFFV_COORD_MRI:
-                    landmarks = _mri_landmarks_to_mri_voxels(landmarks * 1e3,
-                                                             t1_mgh)
-                mri_landmarks = landmarks
-            else:
-                raise ValueError('Coordinate frame not recognized, '
-                                 f'found {coord_frame}')
-        elif trans is not None:
-            # get trans and ensure it is from head to MRI
-            trans, _ = _get_trans(trans, fro='head', to='mri')
+            elif coord_frame == FIFF.FIFFV_COORD_MRI:
+                landmarks *= 1e3  # m to mm conversion
 
-            if not isinstance(raw, BaseRaw):
-                raise ValueError('`raw` must be specified if `trans` '
-                                 'is not None')
+            # need get scanner RAS: MRI--[inv vox2ras_tkr]-->scanner RAS
+            if bids_path.suffix != 'T1w' and coord_frame in \
+                    (FIFF.FIFFV_COORD_HEAD, FIFF.FIFFV_COORD_MRI):
+                t1w_img = _load_image(t1w, name='t1w')
+                t1w_mgh = nib.MGHImage(t1w_img.dataobj, t1w_img.affine)
+                # go to T1 voxel space from surface RAS/TkReg RAS/freesurfer
+                landmarks = _mri_landmarks_to_mri_voxels(landmarks, t1w_mgh)
+                # go to T1 scanner space from T1 voxel space
+                landmarks = _mri_voxels_to_mri_scanner_ras(landmarks, t1w_mgh)
+                landmarks *= 1e-3  # mm -> m
+                coord_frame = FIFF.FIFFV_MNE_COORD_RAS
 
-            # Prepare to write the sidecar JSON
-            # extract MEG landmarks
-            coords_dict, coord_fname = _get_fid_coords(raw.info['dig'])
-            meg_landmarks = np.asarray((coords_dict['lpa'],
-                                        coords_dict['nasion'],
-                                        coords_dict['rpa']))
-            mri_landmarks = _meg_landmarks_to_mri_landmarks(
-                meg_landmarks, trans)
-            mri_landmarks = _mri_landmarks_to_mri_voxels(
-                mri_landmarks, t1_mgh)
+            # convert to voxels from surface or scanner RAS depending on above
+            if coord_frame == FIFF.FIFFV_MNE_COORD_RAS:
+                # go from scanner RAS to image voxels
+                landmarks = _mri_scanner_ras_to_mri_voxels(
+                    landmarks * 1e3, img_mgh)
+            else:  # must be T1, going from surface RAS->voxels
+                landmarks = _mri_landmarks_to_mri_voxels(landmarks, img_mgh)
 
         # Write sidecar.json
-        t1w_json = dict()
-        t1w_json['AnatomicalLandmarkCoordinates'] = \
-            {'LPA': list(mri_landmarks[0, :]),
-             'NAS': list(mri_landmarks[1, :]),
-             'RPA': list(mri_landmarks[2, :])}
-        fname = t1w_basename.copy().update(extension='.json')
+        img_json = dict()
+        img_json['AnatomicalLandmarkCoordinates'] = \
+            {'LPA': list(landmarks[0, :]),
+             'NAS': list(landmarks[1, :]),
+             'RPA': list(landmarks[2, :])}
+        fname = bids_path.copy().update(extension='.json')
         if op.isfile(fname) and not overwrite:
             raise IOError('Wanted to write a file but it already exists and '
                           '`overwrite` is set to False. File: "{}"'
                           .format(fname))
-        _write_json(fname, t1w_json, overwrite, verbose)
+        _write_json(fname, img_json, overwrite, verbose)
 
         if deface:
-            t1w = _deface(t1w, mri_landmarks, deface)
+            image_nii = _deface(image_nii, landmarks, deface)
 
     # Save anatomical data
-    if op.exists(t1w_basename):
+    if op.exists(bids_path):
         if overwrite:
-            os.remove(t1w_basename)
+            os.remove(bids_path)
         else:
-            raise IOError('Wanted to write a file but it already exists and '
-                          '`overwrite` is set to False. File: "{}"'
-                          .format(t1w_basename))
+            raise IOError(f'Wanted to write a file but it already exists and '
+                          f'`overwrite` is set to False. File: "{bids_path}"')
 
-    nib.save(t1w, t1w_basename.fpath)
+    nib.save(image_nii, bids_path.fpath)
 
-    return anat_dir
+    return bids_path
 
 
 def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
@@ -1461,7 +1722,7 @@ def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
         Descriptions of the reasons that lead to the exclusion of the
         channel(s). If a list, it must match the length of ``ch_names``.
         If ``None``, no descriptions are added.
-    bids_path : BIDSPath
+    bids_path : mne_bids.BIDSPath
         The recording to update. The :class:`mne_bids.BIDSPath` instance passed
         here **must** have the ``.root`` attribute set. The ``.datatype``
         attribute **may** be set. If ``.datatype`` is not set and only one data
@@ -1533,19 +1794,10 @@ def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
                          'Please use `bids_path.update(root="<root>")` '
                          'to set the root of the BIDS folder to read.')
 
-    # Read raw and sidecar file.
-    raw = read_raw_bids(bids_path=bids_path,
-                        extra_params=dict(allow_maxshield=True, preload=True),
-                        verbose=False)
-    bads_raw = raw.info['bads']
-
+    # Read sidecar file.
     channels_fname = _find_matching_sidecar(bids_path, suffix='channels',
                                             extension='.tsv')
     tsv_data = _from_tsv(channels_fname)
-    if 'status' in tsv_data:
-        bads_tsv = _get_bads_from_tsv_data(tsv_data)
-    else:
-        bads_tsv = []
 
     # Read sidecar and create required columns if they do not exist.
     if 'status' not in tsv_data:
@@ -1566,13 +1818,6 @@ def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
         logger.info('Resetting status and description for all channels.')
         tsv_data['status'] = ['good'] * len(tsv_data['name'])
         tsv_data['status_description'] = ['n/a'] * len(tsv_data['name'])
-    elif not overwrite and not bads_tsv and bads_raw:
-        # No bads are marked in channels.tsv, but in raw.info['bads'], and
-        # the user requested to UPDATE (overwrite=False) the channel status.
-        # -> Inject bads from info['bads'] into channels.tsv before proceeding!
-        for ch_name in bads_raw:
-            idx = tsv_data['name'].index(ch_name)
-            tsv_data['status'][idx] = 'bad'
 
     # Now actually mark the user-requested channels as bad.
     for ch_name, description in zip(ch_names, descriptions):
@@ -1593,3 +1838,99 @@ def mark_bad_channels(ch_names, descriptions=None, *, bids_path,
     raw.info['bads'] = bads
     # XXX (How) will this handle split files?
     # raw.save(raw.filenames[0], overwrite=True, verbose=False)
+
+def write_meg_calibration(calibration, bids_path, verbose=None):
+    """Write the Elekta/Neuromag/MEGIN fine-calibration matrix to disk.
+
+    Parameters
+    ----------
+    calibration : path-like | dict
+        Either the path of the ``.dat`` file containing the file-calibration
+        matrix, or the dictionary returned by
+        :func:`mne.preprocessing.read_fine_calibration`.
+    bids_path : mne_bids.BIDSPath
+        A :class:`mne_bids.BIDSPath` instance with at least ``root`` and
+        ``subject`` set,  and that ``datatype`` is either ``'meg'`` or
+        ``None``.
+    verbose : bool | None
+         If a boolean, whether or not to produce verbose output. If ``None``,
+         use the default log level.
+
+    Examples
+    --------
+    >>> calibration = mne.preprocessing.read_fine_calibration('sss_cal.dat')
+    >>> bids_path = BIDSPath(subject='01', session='test', root='/data')
+    >>> write_meg_calibration(calibration, bids_path)
+    """
+    if bids_path.root is None or bids_path.subject is None:
+        raise ValueError('bids_path must have root and subject set.')
+    if bids_path.datatype not in (None, 'meg'):
+        raise ValueError('Can only write fine-calibration information for MEG '
+                         'datasets.')
+
+    _validate_type(calibration, types=('path-like', dict),
+                   item_name='calibration',
+                   type_name='path or dictionary')
+
+    if (isinstance(calibration, dict) and
+            ('ch_names' not in calibration or
+             'locs' not in calibration or
+             'imb_cals' not in calibration)):
+        raise ValueError('The dictionary you passed does not appear to be a '
+                         'proper fine-calibration dict. Please only pass the '
+                         'output of '
+                         'mne.preprocessing.read_fine_calibration(), or a '
+                         'filename.')
+
+    if not isinstance(calibration, dict):
+        calibration = mne.preprocessing.read_fine_calibration(calibration)
+
+    out_path = BIDSPath(subject=bids_path.subject, session=bids_path.session,
+                        acquisition='calibration', suffix='meg',
+                        extension='.dat', datatype='meg', root=bids_path.root)
+
+    logger.info(f'Writing fine-calibration file to {out_path}')
+    out_path.mkdir()
+    mne.preprocessing.write_fine_calibration(fname=str(out_path),
+                                             calibration=calibration)
+
+
+def write_meg_crosstalk(fname, bids_path, verbose=None):
+    """Write the Elekta/Neuromag/MEGIN crosstalk information to disk.
+
+    Parameters
+    ----------
+    fname : path-like
+        The path of the ``FIFF`` file containing the crosstalk information.
+    bids_path : mne_bids.BIDSPath
+        A :class:`mne_bids.BIDSPath` instance with at least ``root`` and
+        ``subject`` set,  and that ``datatype`` is either ``'meg'`` or
+        ``None``.
+    verbose : bool | None
+         If a boolean, whether or not to produce verbose output. If ``None``,
+         use the default log level.
+
+    Examples
+    --------
+    >>> crosstalk_fname = 'ct_sparse.fif'
+    >>> bids_path = BIDSPath(subject='01', session='test', root='/data')
+    >>> write_megcrosstalk(crosstalk_fname, bids_path)
+    """
+    if bids_path.root is None or bids_path.subject is None:
+        raise ValueError('bids_path must have root and subject set.')
+    if bids_path.datatype not in (None, 'meg'):
+        raise ValueError('Can only write fine-calibration information for MEG '
+                         'datasets.')
+
+    _validate_type(fname, types=('path-like',), item_name='fname')
+
+    # MNE doesn't have public reader and writer functions for crosstalk data,
+    # so just copy the original file. Use shutil.copyfile() to only copy file
+    # contents, but not metadata & permissions.
+    out_path = BIDSPath(subject=bids_path.subject, session=bids_path.session,
+                        acquisition='crosstalk', suffix='meg',
+                        extension='.fif', datatype='meg', root=bids_path.root)
+
+    logger.info(f'Writing crosstalk file to {out_path}')
+    out_path.mkdir()
+    shutil.copyfile(src=fname, dst=str(out_path))

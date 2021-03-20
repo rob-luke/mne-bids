@@ -1,15 +1,19 @@
 """
-===============================================
-10. Changing which channels are marked as "bad"
-===============================================
+=========================================================
+03. Interactive data inspection and bad channel selection
+=========================================================
 
-You can use MNE-BIDS to mark MEG or (i)EEG recording channels as "bad", for
-example if the connected sensor produced mostly noise – or no signal at
-all.
+You can use MNE-BIDS interactively inspect your  MEG or (i)EEG data.
+Problematic channels can be marked as "bad", for example if the connected
+sensor produced mostly noise – or no signal at all. Similarly, you can declare
+channels as "good", should you discover they were incorrectly marked as bad.
+Bad channel selection can also be performed non-interactively.
 
-Similarly, you can declare channels as "good", should you discover they were
-incorrectly marked as bad.
-"""
+Furthermore, you can view and edit the experimental events and mark time
+segments as "bad".
+
+.. _MNE-Python Annotations tutorial: https://mne.tools/stable/auto_tutorials/raw/plot_30_annotate_raw.html#annotating-raw-objects-interactively
+"""  # noqa:E501
 
 # Authors: Richard Höchenberger <richard.hoechenberger@gmail.com>
 # License: BSD (3-clause)
@@ -22,22 +26,73 @@ incorrectly marked as bad.
 # "sample" data, and writing it in the BIDS format.
 
 import os.path as op
-import mne
-from mne_bids import BIDSPath, write_raw_bids, read_raw_bids, mark_bad_channels
+import shutil
 
-mne.set_log_level('error')  # Suppress distracting log messages.
+import mne
+from mne_bids import (BIDSPath, write_raw_bids, read_raw_bids,
+                      inspect_dataset, mark_bad_channels)
 
 data_path = mne.datasets.sample.data_path()
 raw_fname = op.join(data_path, 'MEG', 'sample', 'sample_audvis_raw.fif')
+events_fname = op.join(data_path, 'MEG', 'sample', 'sample_audvis_raw-eve.fif')
+event_id = {'Auditory/Left': 1, 'Auditory/Right': 2, 'Visual/Left': 3,
+            'Visual/Right': 4, 'Smiley': 5, 'Button': 32}
 bids_root = op.join(data_path, '..', 'MNE-sample-data-bids')
 bids_path = BIDSPath(subject='01', session='01', task='audiovisual', run='01',
                      root=bids_root)
 
-raw = mne.io.read_raw_fif(raw_fname, verbose=False)
-raw.info['line_freq'] = 60  # Specify power line frequency as required by BIDS.
-write_raw_bids(raw, bids_path=bids_path, overwrite=True, verbose=False)
+###############################################################################
+# To ensure the output path doesn't contain any leftover files from previous
+# tests and example runs, we simply delete it.
+#
+# .. warning:: Do not delete directories that may contain important data!
+#
+
+if op.exists(bids_root):
+    shutil.rmtree(bids_root)
 
 ###############################################################################
+# Now write the raw data to BIDS.
+
+raw = mne.io.read_raw_fif(raw_fname, verbose=False)
+raw.info['line_freq'] = 60  # Specify power line frequency as required by BIDS.
+write_raw_bids(raw, bids_path=bids_path, events_data=events_fname,
+               event_id=event_id, overwrite=True, verbose=False)
+
+###############################################################################
+# Interactive use
+# ---------------
+#
+# Using :func:`mne_bids.inspect_dataset`, we can interactively explore the raw
+# data and toggle the channel status – ``bad`` or ``good`` – by clicking on the
+# respective traces or channel names. If there are any SSP projectors stored
+# with the data, a small popup window will allow you to toggle the projectors
+# on and off. If you changed the selection of bad channels, you will be
+# prompted whether you would like to save the changes when closing the main
+# window. Your raw data and the `*_channels.tsv` sidecar file will be updated
+# upon saving.
+
+inspect_dataset(bids_path)
+
+###############################################################################
+# You can even apply frequency filters when viewing the data: A high-pass
+# filter can remove slow drifts, while a low-pass filter will get rid of
+# high-frequency artifacts. This can make visual inspection easier. Let's
+# apply filters with a 1-Hz high-pass cutoff, and a 30-Hz low-pass cutoff:
+
+inspect_dataset(bids_path, l_freq=1., h_freq=30.)
+
+###############################################################################
+# By pressing the ``A`` key, you can toggle annotation mode to add, edit, or
+# remove experimental events, or to mark entire time periods as bad. Please see
+# the `MNE-Python Annotations tutorial`_ for an introduction to the interactive
+# interface. If you're closing the main window after changing the annotations,
+# you will be prompted whether you wish to save the changes. Your raw data and
+# the `*_events.tsv` sidecar file will be updated upon saving.
+#
+# Non-interactive (programmatic) bad channel selection
+# ----------------------------------------------------
+#
 # Read the (now BIDS-formatted) data and print a list of channels currently
 # marked as bad.
 

@@ -4,7 +4,7 @@ version: 2.1
 jobs:
   docs-build:
     docker:
-      - image: circleci/python:3.8.1-buster
+      - image: cimg/python:3.8
     steps:
         - checkout
 
@@ -16,15 +16,15 @@ jobs:
         # Also restore pip cache to speed up installations
         - restore_cache:
             keys:
-              - pip-cache-0-{{ checksum "./requirements.txt" }}
+              - pip-cache-0-{{ checksum "./test_requirements.txt" }}
 
         - run:
             name: Get Python running
             command: |
               python -m pip install --user --upgrade --progress-bar off pip
-              python -m pip install --user --upgrade --progress-bar off -r requirements.txt
+              python -m pip install --user --upgrade --progress-bar off -r test_requirements.txt
               python -m pip install --user --upgrade --progress-bar off -r doc/requirements.txt
-              pip install --upgrade --no-deps https://api.github.com/repos/mne-tools/mne-python/zipball/master
+              python -m pip install --upgrade --no-deps https://api.github.com/repos/mne-tools/mne-python/zipball/main
               python -m pip install --user -e .
 
         - run:
@@ -40,6 +40,12 @@ jobs:
             path: doc/_build/html/
             destination: dev
 
+        - run:
+            name: Check links
+            command: |
+              make -C doc clean
+              make -C doc linkcheck
+
         # Store the data cache
         - save_cache:
             key: data-cache-0-{{ checksum "./mne_bids/__init__.py" }}
@@ -48,14 +54,14 @@ jobs:
 
         # Store pip cache
         - save_cache:
-            key: pip-cache-0-{{ checksum "./requirements.txt" }}
+            key: pip-cache-0-{{ checksum "./test_requirements.txt" }}
             paths:
               - ~/.cache/pip
 
   docs-deploy:
     # will only be run on master branch
     docker:
-      - image: node:8.10.0
+      - image: node:8
     steps:
       - checkout
 
@@ -65,7 +71,7 @@ jobs:
       - run:
           name: Install and configure dependencies
           command: |
-            npm install -g --silent gh-pages@2.2
+            npm install --global gh-pages@3.0
             git config --global user.email "circle@mne.com"
             git config --global user.name "Circle Ci"
 

@@ -6,8 +6,9 @@
 # License: BSD (3-clause)
 import os.path as op
 import datetime
-import pytest
+from distutils.version import LooseVersion
 
+import pytest
 from scipy.io import savemat
 
 # This is here to handle mne-python <0.20
@@ -19,7 +20,6 @@ with warnings.catch_warnings():
     import mne
 
 from mne.datasets import testing
-from mne.utils import _TempDir
 from mne_bids import BIDSPath
 from mne_bids.utils import _handle_datatype
 from mne_bids.path import _parse_ext
@@ -27,6 +27,7 @@ from mne_bids.path import _parse_ext
 from mne_bids.copyfiles import (_get_brainvision_encoding,
                                 _get_brainvision_paths,
                                 copyfile_brainvision,
+                                copyfile_edf,
                                 copyfile_eeglab,
                                 copyfile_kit)
 
@@ -48,9 +49,8 @@ def test_get_brainvision_encoding():
         f.readlines()
 
 
-def test_get_brainvision_paths():
+def test_get_brainvision_paths(tmpdir):
     """Test getting the file links from a BrainVision header."""
-    test_dir = _TempDir()
     data_path = op.join(base_path, 'brainvision', 'tests', 'data')
     raw_fname = op.join(data_path, 'test.vhdr')
 
@@ -58,17 +58,17 @@ def test_get_brainvision_paths():
         _get_brainvision_paths(op.join(data_path, 'test.eeg'))
 
     # Write some temporary test files
-    with open(op.join(test_dir, 'test1.vhdr'), 'w') as f:
+    with open(tmpdir / 'test1.vhdr', 'w') as f:
         f.write('DataFile=testing.eeg')
 
-    with open(op.join(test_dir, 'test2.vhdr'), 'w') as f:
+    with open(tmpdir / 'test2.vhdr', 'w') as f:
         f.write('MarkerFile=testing.vmrk')
 
     with pytest.raises(ValueError):
-        _get_brainvision_paths(op.join(test_dir, 'test1.vhdr'))
+        _get_brainvision_paths(tmpdir / 'test1.vhdr')
 
     with pytest.raises(ValueError):
-        _get_brainvision_paths(op.join(test_dir, 'test2.vhdr'))
+        _get_brainvision_paths(tmpdir / 'test2.vhdr')
 
     # This should work
     eeg_file_path, vmrk_file_path = _get_brainvision_paths(raw_fname)
@@ -78,9 +78,11 @@ def test_get_brainvision_paths():
     assert tail == 'test.vmrk'
 
 
-def test_copyfile_brainvision():
+@pytest.mark.filterwarnings('ignore:.*Exception ignored.*:'
+                            'pytest.PytestUnraisableExceptionWarning')
+def test_copyfile_brainvision(tmpdir):
     """Test the copying of BrainVision vhdr, vmrk and eeg files."""
-    bids_root = _TempDir()
+    bids_root = str(tmpdir)
     data_path = op.join(base_path, 'brainvision', 'tests', 'data')
     raw_fname = op.join(data_path, 'test.vhdr')
     new_name = op.join(bids_root, 'tested_conversion.vhdr')
@@ -112,33 +114,115 @@ def test_copyfile_brainvision():
     assert new_date == (prev_date - datetime.timedelta(days=32459))
 
 
-def test_copyfile_eeglab():
+def test_copyfile_edf(tmpdir):
+    """Test the anonymization of EDF/BDF files."""
+    bids_root = str(tmpdir.mkdir("bids1"))
+    data_path = op.join(base_path, 'edf', 'tests', 'data')
+
+    # Test regular copying
+    for ext in ['.edf', '.bdf']:
+        raw_fname = op.join(data_path, 'test' + ext)
+        new_name = op.join(bids_root, 'test_copy' + ext)
+        copyfile_edf(raw_fname, new_name)
+
+    # IO error testing
+    with pytest.raises(ValueError, match='Need to move data with same'):
+        raw_fname = op.join(data_path, 'test.edf')
+        new_name = op.join(bids_root, 'test_copy.bdf')
+        copyfile_edf(raw_fname, new_name)
+
+    # Add some subject info to an EDF to test anonymization
+    testfile = op.join(bids_root, 'test_copy.edf')
+    raw_date = mne.io.read_raw_edf(testfile).info['meas_date']
+    date = datetime.datetime.strftime(raw_date, "%d-%b-%Y").upper()
+    test_id_info = '023 F 02-AUG-1951 Jane'
+    test_rec_info = 'Startdate {0} ID-123 John BioSemi_ActiveTwo'.format(date)
+    with open(testfile, 'r+b') as f:
+        f.seek(8)
+        f.write(bytes(test_id_info.ljust(80), 'ascii'))
+        f.write(bytes(test_rec_info.ljust(80), 'ascii'))
+
+    # Test date anonymization
+    def _edf_get_real_date(fpath):
+        with open(fpath, 'rb') as f:
+            f.seek(88)
+            rec_info = f.read(80).decode('ascii').rstrip()
+        startdate = rec_info.split(' ')[1]
+        return datetime.datetime.strptime(startdate, "%d-%b-%Y")
+
+    bids_root2 = tmpdir.mkdir("bids2")
+    infile = op.join(bids_root, 'test_copy.edf')
+    outfile = op.join(bids_root2, 'test_copy_anon.edf')
+    anonymize = {'daysback': 33459, 'keep_his': False}
+    copyfile_edf(infile, outfile, anonymize)
+    new_date = _edf_get_real_date(outfile)
+
+    # new anonymized date should be the minimum in EDF spec
+    # (i.e. 01-01-1985)
+    assert new_date == datetime.datetime(year=1985, month=1, day=1)
+
+    # Test full ID info anonymization
+    anon_startdate = datetime.datetime.strftime(new_date, "%d-%b-%Y").upper()
+    with open(outfile, 'rb') as f:
+        f.seek(8)
+        id_info = f.read(80).decode('ascii').rstrip()
+        rec_info = f.read(80).decode('ascii').rstrip()
+    rec_info_tmp = "Startdate {0} X mne-bids_anonymize X"
+    assert id_info == "0 X X X"
+    assert rec_info == rec_info_tmp.format(anon_startdate)
+
+    # Test partial ID info anonymization
+    outfile2 = op.join(bids_root2, 'test_copy_anon_partial.edf')
+    anonymize = {'daysback': 33459, 'keep_his': True}
+    copyfile_edf(infile, outfile2, anonymize)
+    with open(outfile2, 'rb') as f:
+        f.seek(8)
+        id_info = f.read(80).decode('ascii').rstrip()
+        rec_info = f.read(80).decode('ascii').rstrip()
+    rec = 'Startdate {0} ID-123 John BioSemi_ActiveTwo'.format(anon_startdate)
+    assert id_info == "023 F X X"
+    assert rec_info == rec
+
+
+@pytest.mark.parametrize('fname',
+                         ('test_raw.set', 'test_raw_chanloc.set'))
+def test_copyfile_eeglab(tmpdir, fname):
     """Test the copying of EEGlab set and fdt files."""
-    bids_root = _TempDir()
+    if (fname == 'test_raw_chanloc.set' and
+            LooseVersion(testing.get_version()) < LooseVersion('0.112')):
+        return
+
+    bids_root = str(tmpdir)
     data_path = op.join(testing.data_path(), 'EEGLAB')
-    raw_fname = op.join(data_path, 'test_raw.set')
+    raw_fname = op.join(data_path, fname)
     new_name = op.join(bids_root, 'tested_conversion.set')
 
     # IO error testing
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Need to move data with same ext"):
         copyfile_eeglab(raw_fname, new_name + '.wrong')
 
     # Bad .set file testing
-    with pytest.raises(ValueError):
-        tmp = _TempDir()
-        fake_set = op.join(tmp, 'fake.set')
+    with pytest.raises(ValueError, match='Could not find "EEG" field'):
+        fake_set = op.join(bids_root, 'fake.set')
         savemat(fake_set, {'arr': [1, 2, 3]}, appendmat=False)
         copyfile_eeglab(fake_set, new_name)
 
     # Test copying and reading a combined set+fdt
     copyfile_eeglab(raw_fname, new_name)
-    raw = mne.io.read_raw_eeglab(new_name)
+    if fname == 'test_raw_chanloc.set':
+        with pytest.warns(RuntimeWarning,
+                          match="The data contains 'boundary' events"):
+            raw = mne.io.read_raw_eeglab(new_name)
+            assert 'Fp1' in raw.ch_names
+    else:
+        raw = mne.io.read_raw_eeglab(new_name)
+        assert 'EEG 001' in raw.ch_names
     assert isinstance(raw, mne.io.BaseRaw)
 
 
-def test_copyfile_kit():
+def test_copyfile_kit(tmpdir):
     """Test copying and renaming KIT files to a new location."""
-    output_path = _TempDir()
+    output_path = str(tmpdir)
     data_path = op.join(base_path, 'kit', 'tests', 'data')
     raw_fname = op.join(data_path, 'test.sqd')
     hpi_fname = op.join(data_path, 'test_mrk.sqd')

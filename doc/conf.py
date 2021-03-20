@@ -37,14 +37,31 @@ extensions = [
     'sphinx.ext.intersphinx',
     'sphinx_gallery.gen_gallery',
     'numpydoc',
-    'gen_cli'  # custom extension, see ./sphinxext/gen_cli.py
+    'sphinx_copybutton',
+    'gen_cli',  # custom extension, see ./sphinxext/gen_cli.py
+    'gh_substitutions',  # custom extension, see ./sphinxext/gh_substitutions.py
 ]
+
+# configure sphinx-copybutton
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_prompt_is_regexp = True
+
+# configure numpydoc
+numpydoc_xref_param_type = True
+numpydoc_class_members_toctree = False
+numpydoc_attributes_as_param_list = True
+numpydoc_xref_aliases = {
+    'NibabelImageObject': 'nibabel.spatialimages.SpatialImage',
+}
+numpydoc_xref_ignore = {
+    # words
+    'of',
+}
+
 
 # generate autosummary even if no references
 autosummary_generate = True
 autodoc_default_options = {'inherited-members': None}
-numpydoc_class_members_toctree = False
-numpydoc_attributes_as_param_list = True
 default_role = 'autolink'  # XXX silently allows bad syntax, someone should fix
 
 # The suffix(es) of source filenames.
@@ -76,7 +93,8 @@ release = version
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This patterns also effect to html_static_path and html_extra_path
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ['auto_examples/index.rst', '_build', 'Thumbs.db',
+                    '.DS_Store']
 
 # HTML options (e.g., theme)
 # see: https://sphinx-bootstrap-theme.readthedocs.io/en/latest/README.html
@@ -101,13 +119,15 @@ html_theme_options = {
     'navbar_pagenav': False,  # no "Page" navigation in sidebar
     'bootstrap_version': "3",
     'navbar_links': [
-        ("Examples", "auto_examples/index"),
+        ("News", "whats_new"),
+        ("Install", "install"),
+        ("Use", "use"),
         ("API", "api"),
         ("CLI", "generated/cli"),
-        ("What's new", "whats_new"),
-        ("GitHub", "https://github.com/mne-tools/mne-bids", True),
+        ("Contribute!", "contribute")
     ]}
 
+html_sidebars = {'**': ['localtoc.html']}
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {
@@ -117,6 +137,8 @@ intersphinx_mapping = {
     'scipy': ('https://scipy.github.io/devdocs', None),
     'matplotlib': ('https://matplotlib.org', None),
     'nilearn': ('https://nilearn.github.io', None),
+    'pandas': ('https://pandas.pydata.org/pandas-docs/dev', None),
+    'nibabel': ('https://nipy.org/nibabel', None),
 }
 intersphinx_timeout = 5
 
@@ -149,7 +171,7 @@ sphinx_gallery_conf = {
         'binderhub_url': 'https://mybinder.org',  # noqa: E501 Any URL of a binderhub deployment. Must be full URL (e.g. https://mybinder.org).
         'filepath_prefix': filepath_prefix,  # noqa: E501 A prefix to prepend to any filepaths in Binder links.
         'dependencies': [
-            '../requirements.txt',
+            '../test_requirements.txt',
             './requirements.txt',
         ],
     }

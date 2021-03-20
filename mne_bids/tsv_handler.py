@@ -24,8 +24,10 @@ def _combine_rows(data1, data2, drop_column=None):
         The new combined data.
     """
     data = deepcopy(data1)
+    # next extend the values in data1 with values in data2
     for key, value in data2.items():
         data[key].extend(value)
+
     # Make sure that if there are any columns in data1 that didn't get new
     # data they are populated with "n/a"'s.
     for key in set(data1.keys()) - set(data2.keys()):
@@ -68,7 +70,9 @@ def _contains_row(data, row_data):
     """
     mask = None
     for key, row_value in row_data.items():
-        data_value = np.array(data[key])
+        # if any of the columns don't even exist in the keys
+        # this data_value will return False
+        data_value = np.array(data.get(key))
 
         # Cast row_value to the same dtype as data_value to avoid a NumPy
         # FutureWarning, see
@@ -132,7 +136,7 @@ def _from_tsv(fname, dtypes=None):
 
     """
     data = np.loadtxt(fname, dtype=str, delimiter='\t',
-                      comments=None, encoding='utf-8')
+                      comments=None, encoding='utf-8-sig')
     column_names = data[0, :]
     info = data[1:, :]
     data_dict = OrderedDict()
@@ -162,8 +166,8 @@ def _to_tsv(data, fname):
     n_rows = len(data[list(data.keys())[0]])
     output = _tsv_to_str(data, n_rows)
 
-    with open(fname, 'wb') as f:
-        f.write(output.encode('utf-8'))
+    with open(fname, 'w', encoding='utf-8-sig') as f:
+        f.write(output)
 
 
 def _tsv_to_str(data, rows=5):

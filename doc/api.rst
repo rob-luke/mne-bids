@@ -6,16 +6,8 @@
 API Documentation
 =================
 
-Here we list the Application Programming Interface (API) for MNE-BIDS.
-
-.. contents:: Contents
-   :local:
-   :depth: 2
-
-
-MNE BIDS
-========
-
+mne_bids
+--------
 :py:mod:`mne_bids`:
 
 .. automodule:: mne_bids
@@ -29,6 +21,8 @@ MNE BIDS
 
    write_raw_bids
    read_raw_bids
+   write_meg_calibration
+   write_meg_crosstalk
    BIDSPath
    make_dataset_description
    make_report
@@ -37,28 +31,31 @@ MNE BIDS
    get_head_mri_trans
    get_anonymization_daysback
    print_dir_tree
+   get_entities_from_fname
    get_entity_vals
    get_datatypes
+   update_sidecar_json
+   inspect_dataset
 
-Path
-====
+mne_bids.stats
+--------------
 
-:py:mod:`mne_bids.path`:
+:py:mod:`mne_bids.stats`:
 
-.. automodule:: mne_bids.path
+.. automodule:: mne_bids.stats
    :no-members:
    :no-inherited-members:
 
-.. currentmodule:: mne_bids.path
+.. currentmodule:: mne_bids.stats
 
 .. autosummary::
    :toctree: generated/
 
-   BIDSPath
-   get_entities_from_fname
+   count_events
 
-Copyfiles
-=========
+
+mne_bids.copyfiles
+------------------
 
 :py:mod:`mne_bids.copyfiles`:
 
@@ -72,24 +69,8 @@ Copyfiles
    :toctree: generated/
 
    copyfile_brainvision
+   copyfile_edf
    copyfile_eeglab
    copyfile_ctf
    copyfile_bti
    copyfile_kit
-
-
-Utils
-=====
-
-:py:mod:`mne_bids.utils`:
-
-.. automodule:: mne_bids.utils
-   :no-members:
-   :no-inherited-members:
-
-.. currentmodule:: mne_bids.utils
-
-.. autosummary::
-   :toctree: generated/
-
-   get_anonymization_daysback
