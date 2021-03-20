@@ -289,9 +289,9 @@ def _write_coordsystem_json(*, raw, unit, hpi_coord_system,
         }
     elif datatype == "nirs":
         fid_json = {
-            'NIRSCoordinateSystem': coordsystem_name,  # (Other, Pixels, ACPC)
-            'NIRSCoordinateSystemDescription': coordsystem_desc,
-            'NIRSCoordinateUnits': unit,  # m (MNE), mm, cm , or pixels
+            'NIRSCoordinateSystem': sensor_coord_system,
+            'NIRSCoordinateSystemDescription': sensor_coord_system_descr,
+            'NIRSCoordinateUnits': unit,
         }
 
     # note that any coordsystem.json file shared within sessions
