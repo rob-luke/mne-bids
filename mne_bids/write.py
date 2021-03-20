@@ -664,7 +664,7 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
     n_stimchan = len([ch for ch in raw.info['chs']
                       if ch['kind'] == FIFF.FIFFV_STIM_CH]) - n_ignored
     n_nirscwchan = len([ch for ch in raw.info['chs']
-                      if ch['kind'] == FIFF.FIFFV_FNIRS_CH])
+                        if ch['kind'] == FIFF.FIFFV_FNIRS_CH])
     n_nirscwsrc = len(np.unique([ch.split(" ")[0].split("_")[0] for ch in
                                  raw.copy().pick(picks="fnirs").ch_names]))
     n_nirscwdet = len(np.unique([ch.split(" ")[0].split("_")[1] for ch in
