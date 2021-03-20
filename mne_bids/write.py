@@ -30,7 +30,6 @@ except ImportError:
 from mne.channels.channels import _unit2human
 from mne.utils import check_version, has_nibabel, logger, warn, _validate_type
 import mne.preprocessing
-from mne.io.nirx.nirx import RawNIRX
 
 from mne.io.pick import _picks_to_idx
 
@@ -202,7 +201,8 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
 
     # TODO: massive hack. step 1, get working. step 2, make nice.
     if 'fnirs_cw_amplitude' in raw:
-        ch_data["wavelength"] = [raw.info["chs"][i]["loc"][9] for i in range(len(raw.ch_names))]
+        ch_data["wavelength"] = [raw.info["chs"][i]["loc"][9] for i in
+                                 range(len(raw.ch_names))]
 
         picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
 
@@ -1352,10 +1352,6 @@ def write_raw_bids(raw, bids_path, events_data=None,
 
     # for MEG, we only write coordinate system
     if bids_path.datatype == 'meg' and not emptyroom:
-        _coordsystem_json(raw, unit, orient, manufacturer,
-                          coordsystem_path.fpath, bids_path.datatype,
-                          overwrite, verbose)
-
         _write_coordsystem_json(raw=raw, unit=unit, hpi_coord_system=orient,
                                 sensor_coord_system=orient,
                                 fname=coordsystem_path.fpath,
@@ -1389,8 +1385,6 @@ def write_raw_bids(raw, bids_path, events_data=None,
                   bids_path.datatype, overwrite, verbose)
     _channels_tsv(raw, channels_path.fpath, overwrite, verbose)
     _optodes_tsv(raw, optodes_path.fpath, overwrite, verbose)
-
-
 
     # create parent directories if needed
     _mkdir_p(os.path.dirname(data_path))
