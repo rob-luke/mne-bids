@@ -663,12 +663,13 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
                       if ch['kind'] == FIFF.FIFFV_MISC_CH])
     n_stimchan = len([ch for ch in raw.info['chs']
                       if ch['kind'] == FIFF.FIFFV_STIM_CH]) - n_ignored
-    n_nirscwchan = len([ch for ch in raw.info['chs']
-                        if ch['kind'] == FIFF.FIFFV_FNIRS_CH])
-    n_nirscwsrc = len(np.unique([ch.split(" ")[0].split("_")[0] for ch in
-                                 raw.copy().pick(picks="fnirs").ch_names]))
-    n_nirscwdet = len(np.unique([ch.split(" ")[0].split("_")[1] for ch in
-                                 raw.copy().pick(picks="fnirs").ch_names]))
+    nirs_channels = [ch for ch in raw.info['chs'] if
+                     ch['kind'] == FIFF.FIFFV_FNIRS_CH]
+    n_nirscwchan = len(nirs_channels)
+    n_nirscwsrc = len(np.unique([ch["ch_name"].split(" ")[0].split("_")[0]
+                                 for ch in nirs_channels]))
+    n_nirscwdet = len(np.unique([ch["ch_name"].split(" ")[0].split("_")[1]
+                                 for ch in nirs_channels]))
 
     # Define datatype-specific JSON dictionaries
     ch_info_json_common = [
