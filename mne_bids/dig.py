@@ -4,6 +4,7 @@
 #
 # License: BSD (3-clause)
 import json
+import re
 from collections import OrderedDict
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import mne
 import numpy as np
 from mne.io.constants import FIFF
 from mne.utils import _check_ch_locs, logger, warn
+from mne.io.pick import _picks_to_idx
 
 from mne_bids.config import (BIDS_IEEG_COORDINATE_FRAMES,
                              BIDS_MEG_COORDINATE_FRAMES,
@@ -116,6 +118,64 @@ def _get_impedances(raw, names):
     # replace np.nan with BIDS 'n/a' representation
     impedances = [i if not np.isnan(i) else "n/a" for i in impedances]
     return impedances
+
+
+def _write_optodes_tsv(raw, fname, overwrite=False, verbose=True):
+    """Create a optodes.tsv file and save it.
+
+    Parameters
+    ----------
+    raw : instance of Raw
+        The data as MNE-Python Raw object.
+    fname : str | BIDSPath
+        Filename to save the optodes.tsv to.
+    overwrite : bool
+        Whether to overwrite the existing file.
+        Defaults to False.
+    verbose : bool
+        Set verbose output to True or False.
+
+    """
+    picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
+    sources = np.zeros(picks.shape)
+    detectors = np.zeros(picks.shape)
+    for ii in picks:
+        ch1_name_info = re.match(r'S(\d+)_D(\d+) (\d+)',
+                                 raw.info['chs'][ii]['ch_name'])
+        sources[ii] = ch1_name_info.groups()[0]
+        detectors[ii] = ch1_name_info.groups()[1]
+    unique_sources = np.unique(sources)
+    n_sources = len(unique_sources)
+    unique_detectors = np.unique(detectors)
+    names = np.concatenate((
+        ["S" + str(s) for s in unique_sources.astype(int)],
+        ["D" + str(d) for d in unique_detectors.astype(int)]))
+
+    xs = np.zeros(names.shape)
+    ys = np.zeros(names.shape)
+    zs = np.zeros(names.shape)
+    for i, source in enumerate(unique_sources):
+        s_idx = np.where(sources == source)[0][0]
+        xs[i] = raw.info["chs"][s_idx]["loc"][3]
+        ys[i] = raw.info["chs"][s_idx]["loc"][4]
+        zs[i] = raw.info["chs"][s_idx]["loc"][5]
+    for i, detector in enumerate(unique_detectors):
+        d_idx = np.where(detectors == detector)[0][0]
+        xs[i + n_sources] = raw.info["chs"][d_idx]["loc"][6]
+        ys[i + n_sources] = raw.info["chs"][d_idx]["loc"][7]
+        zs[i + n_sources] = raw.info["chs"][d_idx]["loc"][8]
+
+    ch_data = OrderedDict([
+        ('name', names),
+        ('type', np.concatenate((np.full(len(unique_sources), 'source'),
+                                 np.full(len(unique_detectors), 'detector')))),
+        ('x', xs),
+        ('y', ys),
+        ('z', zs),
+    ])
+
+    _write_tsv(fname, ch_data, overwrite, verbose)
+
 
 
 def _write_electrodes_tsv(raw, fname, datatype, overwrite=False, verbose=True):
@@ -361,6 +421,8 @@ def _write_dig_bids(bids_path, raw, overwrite=False, verbose=True):
     datatype = bids_path.datatype
     electrodes_path = BIDSPath(**coord_file_entities, suffix='electrodes',
                                extension='.tsv')
+    optodes_path = BIDSPath(**coord_file_entities, suffix='optodes',
+                               extension='.tsv')
     coordsystem_path = BIDSPath(**coord_file_entities, suffix='coordsystem',
                                 extension='.json')
 
@@ -388,7 +450,7 @@ def _write_dig_bids(bids_path, raw, overwrite=False, verbose=True):
             warn("Coordinate frame of iEEG coords missing/unknown "
                  "for {}. Skipping reading "
                  "in of montage...".format(electrodes_path))
-    elif datatype in ['eeg', 'nirs']:
+    elif datatype == 'eeg':
         # We only write EEG electrodes.tsv and coordsystem.json
         # if we have LPA, RPA, and NAS available to rescale to a known
         # coordinate system frame
@@ -399,9 +461,8 @@ def _write_dig_bids(bids_path, raw, overwrite=False, verbose=True):
         # mne-python automatically converts unknown coord frame to head
         if coord_frame_int == FIFF.FIFFV_COORD_HEAD and landmarks:
             # Now write the data
-            if datatype == 'eeg':
-                _write_electrodes_tsv(raw, electrodes_path, datatype,
-                                      overwrite, verbose)
+            _write_electrodes_tsv(raw, electrodes_path, datatype,
+                                  overwrite, verbose)
             _write_coordsystem_json(raw=raw, unit='m', hpi_coord_system='n/a',
                                     sensor_coord_system='CapTrak',
                                     fname=coordsystem_path, datatype=datatype,
@@ -411,6 +472,30 @@ def _write_dig_bids(bids_path, raw, overwrite=False, verbose=True):
                  "Setting montage not possible if anatomical "
                  "landmarks (NAS, LPA, RPA) are missing, "
                  "and coord_frame is not 'head'.")
+
+    elif datatype == 'nirs':
+        # We only write NIRS optodes.tsv and coordsystem.json
+        # if we have LPA, RPA, and NAS available to rescale to a known
+        # coordinate system frame
+        coords = _extract_landmarks(raw.info['dig'])
+        landmarks = set(['RPA', 'NAS', 'LPA']) == set(list(coords.keys()))
+
+        # XXX: to be improved to allow rescaling if landmarks are present
+        # mne-python automatically converts unknown coord frame to head
+        if coord_frame_int == FIFF.FIFFV_COORD_HEAD and landmarks:
+            # Now write the data
+            _write_optodes_tsv(raw, optodes_path,
+                               overwrite, verbose)
+            _write_coordsystem_json(raw=raw, unit='m', hpi_coord_system='n/a',
+                                    sensor_coord_system='CapTrak',
+                                    fname=coordsystem_path, datatype=datatype,
+                                    overwrite=overwrite, verbose=verbose)
+        else:
+            warn("Skipping fNIRS optodes.tsv... "
+                 "Setting montage not possible if anatomical "
+                 "landmarks (NAS, LPA, RPA) are missing, "
+                 "and coord_frame is not 'head'.")
+
 
 
 def _read_dig_bids(electrodes_fpath, coordsystem_fpath,

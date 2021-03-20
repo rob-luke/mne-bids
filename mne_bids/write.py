@@ -59,63 +59,6 @@ def _is_numeric(n):
     return isinstance(n, (np.integer, np.floating, int, float))
 
 
-def _optodes_tsv(raw, fname, overwrite=False, verbose=True):
-    """Create a optodes.tsv file and save it.
-
-    Parameters
-    ----------
-    raw : instance of Raw
-        The data as MNE-Python Raw object.
-    fname : str | BIDSPath
-        Filename to save the optodes.tsv to.
-    overwrite : bool
-        Whether to overwrite the existing file.
-        Defaults to False.
-    verbose : bool
-        Set verbose output to True or False.
-
-    """
-    picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
-    sources = np.zeros(picks.shape)
-    detectors = np.zeros(picks.shape)
-    for ii in picks:
-        ch1_name_info = re.match(r'S(\d+)_D(\d+) (\d+)',
-                                 raw.info['chs'][ii]['ch_name'])
-        sources[ii] = ch1_name_info.groups()[0]
-        detectors[ii] = ch1_name_info.groups()[1]
-    unique_sources = np.unique(sources)
-    n_sources = len(unique_sources)
-    unique_detectors = np.unique(detectors)
-    names = np.concatenate((
-        ["S" + str(s) for s in unique_sources.astype(int)],
-        ["D" + str(d) for d in unique_detectors.astype(int)]))
-
-    xs = np.zeros(names.shape)
-    ys = np.zeros(names.shape)
-    zs = np.zeros(names.shape)
-    for i, source in enumerate(unique_sources):
-        s_idx = np.where(sources == source)[0][0]
-        xs[i] = raw.info["chs"][s_idx]["loc"][3]
-        ys[i] = raw.info["chs"][s_idx]["loc"][4]
-        zs[i] = raw.info["chs"][s_idx]["loc"][5]
-    for i, detector in enumerate(unique_detectors):
-        d_idx = np.where(detectors == detector)[0][0]
-        xs[i + n_sources] = raw.info["chs"][d_idx]["loc"][6]
-        ys[i + n_sources] = raw.info["chs"][d_idx]["loc"][7]
-        zs[i + n_sources] = raw.info["chs"][d_idx]["loc"][8]
-
-    ch_data = OrderedDict([
-        ('name', names),
-        ('x', xs),
-        ('y', ys),
-        ('z', zs),
-        ('type', np.concatenate((np.full(len(unique_sources), 'source'),
-                                 np.full(len(unique_detectors), 'detector')))),
-    ])
-
-    _write_tsv(fname, ch_data, overwrite, verbose)
-
-
 def _channels_tsv(raw, fname, overwrite=False, verbose=True):
     """Create a channels.tsv file and save it.
 
@@ -201,8 +144,8 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
 
     # TODO: massive hack. step 1, get working. step 2, make nice.
     if 'fnirs_cw_amplitude' in raw:
-        ch_data["wavelength"] = [raw.info["chs"][i]["loc"][9] for i in
-                                 range(len(raw.ch_names))]
+        ch_data["wavelength_nominal"] = [raw.info["chs"][i]["loc"][9] for i in
+                                         range(len(raw.ch_names))]
 
         picks = _picks_to_idx(raw.info, 'fnirs', exclude=[], allow_empty=True)
 
@@ -215,7 +158,7 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
             detectors[ii] = "D" + str(ch1_name_info.groups()[1])
         ch_data["source"] = sources
         ch_data["detector"] = detectors
-        ch_data.move_to_end('wavelength', last=False)
+        ch_data.move_to_end('wavelength_nominal', last=False)
         ch_data.move_to_end('detector', last=False)
         ch_data.move_to_end('source', last=False)
         ch_data.move_to_end('type', last=False)
@@ -723,8 +666,12 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
                       if ch['kind'] == FIFF.FIFFV_MISC_CH])
     n_stimchan = len([ch for ch in raw.info['chs']
                       if ch['kind'] == FIFF.FIFFV_STIM_CH]) - n_ignored
-    n_nirschan = len([ch for ch in raw.info['chs']
+    n_nirscwchan = len([ch for ch in raw.info['chs']
                       if ch['kind'] == FIFF.FIFFV_FNIRS_CH])
+    n_nirscwsrc = len(np.unique([ch.split(" ")[0].split("_")[0] for ch in
+                                 raw.copy().pick(picks="fnirs").ch_names]))
+    n_nirscwdet = len(np.unique([ch.split(" ")[0].split("_")[1] for ch in
+                                 raw.copy().pick(picks="fnirs").ch_names]))
 
     # Define datatype-specific JSON dictionaries
     ch_info_json_common = [
@@ -758,7 +705,9 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype, overwrite=False,
         ('ECGChannelCount', n_ecgchan),
         ('EMGChannelCount', n_emgchan),
         ('MiscChannelCount', n_miscchan),
-        ('NIRSChannelCount', n_nirschan),
+        ('NIRSCWChannelCount', n_nirscwchan),
+        ('NIRSCWSourceOptodeCount', n_nirscwsrc),
+        ('NIRSCWDetectorOptodeCount', n_nirscwdet),
         ('TriggerChannelCount', n_stimchan)]
 
     # Stitch together the complete JSON dictionary
@@ -1312,8 +1261,6 @@ def write_raw_bids(raw, bids_path, events_data=None,
     events_path = bids_path.copy().update(suffix='events', extension='.tsv')
     channels_path = bids_path.copy().update(
         suffix='channels', extension='.tsv')
-    optodes_path = bids_path.copy().update(
-        suffix='optodes', extension='.tsv')
     # Anonymize
     convert = False
     if anonymize is not None:
@@ -1382,9 +1329,6 @@ def write_raw_bids(raw, bids_path, events_data=None,
     _sidecar_json(raw, bids_path.task, manufacturer, sidecar_path.fpath,
                   bids_path.datatype, overwrite, verbose)
     _channels_tsv(raw, channels_path.fpath, overwrite, verbose)
-
-    if bids_path.datatype in ['nirs']:
-        _optodes_tsv(raw, optodes_path.fpath, overwrite, verbose)
 
     # create parent directories if needed
     _mkdir_p(os.path.dirname(data_path))
