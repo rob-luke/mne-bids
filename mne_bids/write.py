@@ -210,8 +210,6 @@ def _channels_tsv(raw, fname, overwrite=False, verbose=True):
         detectors = np.empty(picks.shape, dtype="<U20")
         for ii in picks:
             ch1_name_info = re.match(r'S(\d+)_D(\d+) (\d+)',
-
-
                                      raw.info['chs'][ii]['ch_name'])
             sources[ii] = "S" + str(ch1_name_info.groups()[0])
             detectors[ii] = "D" + str(ch1_name_info.groups()[1])
