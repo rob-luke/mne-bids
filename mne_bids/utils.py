@@ -135,8 +135,6 @@ def _handle_datatype(raw, datatype, verbose=True):
             datatypes.append('eeg')
         if 'fnirs' in raw:
             datatypes.append('nirs')
-        if 'eeg' in raw:
-            datatypes.append('eeg')
         if len(datatypes) == 0:
             raise ValueError('No MEG, EEG or iEEG channels found in data. '
                              'Please use raw.set_channel_types to set the '
