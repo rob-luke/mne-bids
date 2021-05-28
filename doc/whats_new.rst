@@ -8,69 +8,65 @@ What's new?
 ===========
 
 .. currentmodule:: mne_bids
-.. _changes_0_7:
+.. _changes_0_8:
 
-Version 0.7 (unreleased)
+Version 0.8 (unreleased)
 ------------------------
 
-xxx
+...
 
 Notable changes
 ~~~~~~~~~~~~~~~
 
-- xxx
+- ...
 
 Authors
 ~~~~~~~
 
-* `Adam Li`_
+* `Alex Rockhill`_
 * `Richard Höchenberger`_
-* `Stefan Appelhoff`_
-* `Diego Lozano-Soldevilla`_
-* `Eduard Ort`_
-* `Alexandre Gramfort`_
-* `Maximilien Chaumon`_
+* `Adam Li`_
+* `Richard Köhler`_ (new contributor)
 
 Detailed list of changes
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Enhancements
 ^^^^^^^^^^^^
+- The fields "DigitizedLandmarks" and "DigitizedHeadPoints" in the json sidecar of Neuromag data are now set to True/False depending on whether any landmarks (NAS, RPA, LPA) or extra points are found in raw.info['dig'], by `Eduard Ort`_ (:gh:`772`)
+- Updated the "Read BIDS datasets" example to use data from `OpenNeuro <https://openneuro.org>`_, by `Alex Rockhill`_ (:gh:`753`)
+- :func:`mne_bids.get_head_mri_trans` is now more lenient when looking for the fiducial points (LPA, RPA, and nasion) in the MRI JSON sidecar file, and accepts a larger variety of landmark names (upper- and lowercase letters; ``'nasion'`` instead of only ``'NAS'``), by `Richard Höchenberger`_ (:gh:`769`)
+- :func:`mne_bids.get_head_mri_trans` gained a new keyword argument ``t1_bids_path``, allowing for the MR scan to be stored in a different session or even in a different BIDS dataset than the electrophysiological recording, by `Richard Höchenberger`_ (:gh:`771`)
+- Add writing simultaneous EEG-iEEG recordings via :func:`mne_bids.write_raw_bids`. The desired output datatype must be specified in the :class:`mne_bids.BIDSPath` object, by `Richard Köhler`_ (:gh:`774`)
+- :func:`mne_bids.write_raw_bids` gained a new keyword argument ``symlink``, which allows to create symbolic links to the original data files instead of copying them over. Currently works for ``FIFF`` files on macOS and Linux, by `Richard Höchenberger`_ (:gh:`778`)
+- :class:`mne_bids.BIDSPath` now has property getter and setter methods for all BIDS entities, i.e., you can now do things like ``bids_path.subject = 'foo'`` and don't have to resort to ``bids_path.update()``. This also ensures you'll get proper completion suggestions from your favorite Python IDE, by `Richard Höchenberger`_ (:gh:`786`)
+- :func:`mne_bids.write_raw_bids` now stores information about continuous head localization measurements (e.g., Elekta/Neuromag cHPI) in the MEG sidecar file, by `Richard Höchenberger`_ (:gh:`794`)
+- :func:`mne_bids.write_raw_bids` gained a new parameter `empty_room` that allows to specify an associated empty-room recording when writing an MEG data file. This information will be stored in the ``AssociatedEmptyRoom`` field of the MEG JSON sidecar file, by `Richard Höchenberger`_ (:gh:`795`)
+- Added support for the new channel type `'dbs'` (Deep Brain Stimulation), which was introduced in MNE-Python 0.23, by `Richard Köhler`_ (:gh:`800`)
 
-- Some datasets out in the real world have a non-standard ``stim_type`` instead of a ``trial_type`` column in ``*_events.tsv``. :func:`mne_bids.read_raw_bids` now makes use of this column, and emits a warning, encouraging users to rename it, by `Richard Höchenberger`_ (:gh:`680`)
-- When reading data where the same event name or trial type refers to different event or trigger values, we will now create a hierarchical event name in the form of ``trial_type/value``, e.g. ``stimulus/110``, by `Richard Höchenberger`_ (:gh:`688`)
-- When reading data via :func:`mne_bids.read_raw_bids`, the channel names specified in the BIDS ``*_channels.tsv`` and ``*_electrodes.tsv`` files now always take precedence (and do not need to match) the channel names stored in the raw files anymore, by `Adam Li`_ and `Richard Höchenberger`_ (:gh:`691`, :gh:`704`)
-- Improve the ``Convert iEEG data to BIDS`` tutorial to include a note on how BIDS and MNE-Python coordinate frames are handled, by `Adam Li`_ (:gh:`717`)
-- More detailed error messages when trying to write modified data via :func:`mne_bids.write_raw_bids`, by `Richard Höchenberger`_ (:gh:`719`)
-- If ``check=True``, :class:`mne_bids.BIDSPath` now checks the ``space`` entity to be valid according to BIDS specification Appendix VIII, by `Stefan Appelhoff`_ (:gh:`724`)
-- ``BIDSPath.root`` now automatically expands ``~`` to the user's home directory, by `Richard Höchenberger`_ (:gh:`725`)
-- Arbitrary file names can now be represented as a `BIDSPath`` by passing the entire name as ``suffix`` and setting ``check=False``, by `Adam Li`_ (:gh:`729`)
-- Add support for MNE's flux excitation channel (``exci``), by `Maximilien Chaumon`_ (:gh:`728`)
+API and behavior changes
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-API changes
-^^^^^^^^^^^
-
-- Add ``format`` kwarg to :func:`write_raw_bids` that allows users to specify if they want to force conversion to ``BrainVision`` or ``FIF`` file format, by `Adam Li`_ (:gh:`672`)
+- Writing datasets via :func:`write_raw_bids`, will now never overwrite ``dataset_description.json`` file, by `Adam Li`_ (:gh:`765`)
+- When writing BIDS datasets, MNE-BIDS now tags them as BIDS 1.6.0 (we previously tagged them as BIDS 1.4.0), by `Richard Höchenberger`_ (:gh:`782`)
+- :func:`mne_bids.read_raw_bids` now passes ``allow_maxshield=True`` to the MNE-Python reader function by default when reading FIFF files. Previously, ``extra_params=dict(allow_maxshield=True)`` had to be passed explicitly, by `Richard Höchenberger`_ (:gh:`#787`)
+- The ``raw_to_bids`` command has lost its ``--allow_maxshield`` parameter. If writing a FIFF file, we will now always assume that writing data before applying a Maxwell filter is fine, by `Richard Höchenberger`_ (:gh:`#787`)
+- :meth:`mne_bids.BIDSPath.find_empty_room` now first looks for an ``AssociatedEmptyRoom`` field in the MEG JSON sidecar file to retrieve the empty-room recording; only if this information is missing, it will proceed to try and find the best-matching empty-room recording based on measurement date (i.e., fall back to the previous behavior), by `Richard Höchenberger`_ (:gh:`#795`)
 
 Requirements
 ^^^^^^^^^^^^
 
-- For writing BrainVision files, ``pybv`` version 0.5 is now required to allow writing of non-voltage channels, by `Adam Li`_ (:gh:`670`)
+- For downloading `OpenNeuro <https://openneuro.org>`_ datasets, ``openneuro-py`` is now required to run the examples and build the documentation, by `Alex Rockhill`_ (:gh:`753`)
+- MNE-BIDS now depends on `setuptools <https://setuptools.readthedocs.io>`_. This package is normally installed by your Python distribution automatically, so we don't expect any users to be affected by this change, by `Richard Höchenberger`_ (:gh:`794`)
 
 Bug fixes
 ^^^^^^^^^
 
-- Fix writing MEGIN Triux files, by `Alexandre Gramfort`_ (:gh:`674`)
-- Anonymization of EDF files in :func:`write_raw_bids` will now convert recording date to ``01-01-1985 00:00:00`` if anonymization takes place, while setting the recording date in the ``scans.tsv`` file to the anonymized date, thus making the file EDF/EDFBrowser compliant, by `Adam Li`_ (:gh:`669`)
-- :func:`mne_bids.write_raw_bids` will not overwrite an existing ``coordsystem.json`` anymore, unless explicitly requested, by `Adam Li`_ (:gh:`675`)
-- :func:`mne_bids.read_raw_bids` now properly handles datasets without event descriptions, by `Richard Höchenberger`_ (:gh:`680`)
-- :func:`mne_bids.stats.count_events` now handles files without a ``trial_type`` or ``stim_type`` column gracefully, by `Richard Höchenberger`_ (:gh:`682`)
-- :func:`mne_bids.read_raw_bids` now correctly treats ``coordsystem.json`` as optional for EEG and MEG data, by `Diego Lozano-Soldevilla`_ (:gh:`691`)
-- :func:`mne_bids.read_raw_bids` now ignores ``exclude`` parameters passed via ``extra_params``, by `Richard Höchenberger`_ (:gh:`703`)
-- :func:`mne_bids.write_raw_bids` now retains original event IDs in the ``value`` column of ``*_events.tsv``, by `Richard Höchenberger`_ (:gh:`708`)
-- Fix writing correct ``iEEGCoordinateSystemDescription``, by `Stefan Appelhoff`_ (:gh:`706`)
-- FIF files that were split due to filesize limitations (using the ``_split-<label>`` entity), are now all listed in ``scans.tsv``, as recommended by BIDS, by `Eduard Ort`_ (:gh:`710`)
-
+- :func:`mne_bids.make_report` now (1) detects male/female sex and left/right handedness irrespective of letter case, (2) will parse a ``gender`` column if no ``sex`` column is found in ``participants.tsv``, and (3) reports sex as male/female instead of man/woman, by `Alex Rockhill`_ (:gh:`755`)
+- The :class:`mne.Annotations` ``BAD_ACQ_SKIP`` – added by the acquisition system to ``FIFF`` files – will now be preserved when reading raw data, even if these time periods are **not** explicitly included in ``*_events.tsv``, by `Richard Höchenberger`_ and `Alexandre Gramfort`_ (:gh:`754` and :gh:`762`)
+- :func:`mne_bids.write_raw_bids` will handle different cased extensions for EDF files, such as `.edf` and `.EDF` by `Adam Li`_ (:gh: `765`)
+- :func:`mne_bids.inspect_dataset` didn't handle certain filenames correctly on some systems, by `Richard Höchenberger`_ (:gh:`769`)
+- :func:`mne_bids.write_raw_bids` now works across data types with ``overwrite=True``, by `Alexandre Gramfort`_ (:gh:`791`)
 
 :doc:`Find out what was new in previous releases <whats_new_previous_releases>`
 

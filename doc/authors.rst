@@ -21,3 +21,5 @@
 .. _Ethan Knights: https://github.com/ethanknights
 .. _Diego Lozano-Soldevilla: https://github.com/dieloz
 .. _Eduard Ort: https://github.com/eort
+.. _Tom Donoghue: https://github.com/TomDonoghue
+.. _Richard Köhler: https://github.com/richardkoehler

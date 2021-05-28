@@ -504,9 +504,13 @@ def test_bids_path(return_bids_test_dir):
                          suffix=suffix, check=False)
 
     # also inherits error check from instantiation
-    # always error check datatype
+    # always error check entities though
+    with pytest.raises(ValueError, match='Key must be one of'):
+        bids_path.copy().update(blah='blah-entity')
+
+    # error check datatype if check is turned back on
     with pytest.raises(ValueError, match='datatype .* is not valid'):
-        bids_path.copy().update(datatype=error_kind)
+        bids_path.copy().update(check=True, datatype=error_kind)
 
     # does not error check on space if check=False ...
     BIDSPath(subject=subject_id, space='foo', suffix='eeg', check=False)
@@ -565,6 +569,30 @@ def test_bids_path(return_bids_test_dir):
     # explicitly test update() method too
     bids_path.update(root='~/foo')
     assert '~/foo' not in str(bids_path.root)
+
+    # Test property setters
+    bids_path = BIDSPath(subject='01', task='noise', datatype='eeg')
+
+    for entity in ('subject', 'session', 'task', 'run', 'acquisition',
+                   'processing', 'recording', 'space', 'suffix', 'extension',
+                   'datatype', 'root', 'split'):
+        if entity == 'run':
+            new_val = '01'
+        elif entity == 'space':
+            new_val = 'CapTrak'
+        elif entity in ['suffix', 'datatype']:
+            new_val = 'eeg'
+        elif entity == 'extension':
+            new_val = '.fif'
+        elif entity == 'root':
+            new_val = Path('foo')
+        elif entity == 'split':
+            new_val = '01'
+        else:
+            new_val = 'foo'
+
+        setattr(bids_path, entity, new_val)
+        assert getattr(bids_path, entity) == new_val
 
 
 def test_make_filenames():
@@ -707,7 +735,6 @@ def test_match(return_bids_test_dir):
                             suffix='channels', extension='.tsv',
                             datatype='meg')
     paths = bids_path_01.match()
-    print(paths)
     assert len(paths) == 1
     assert paths[0].extension == '.tsv'
     assert paths[0].suffix == 'channels'
@@ -723,6 +750,15 @@ def test_match(return_bids_test_dir):
     assert paths[0].extension == '.tsv'
     assert paths[0].suffix == 'channels'
     assert Path(paths[0]).parent.name == 'meg'
+
+    # Test `check` parameter
+    bids_path_01 = bids_path.copy()
+    bids_path_01.update(session=None, task=None, run=None,
+                        suffix='foo', extension='.eeg', check=False)
+    bids_path_01.fpath.touch()
+
+    assert bids_path_01.match(check=True) == []
+    assert bids_path_01.match(check=False)[0].fpath.name == 'sub-01_foo.eeg'
 
 
 @pytest.mark.filterwarnings(warning_str['meas_date_set_to_none'])
@@ -785,7 +821,7 @@ def test_find_empty_room(return_bids_test_dir, tmpdir):
                        match='The root of the "bids_path" must be set'):
         bids_path.copy().update(root=None).find_empty_room()
 
-    # assert that we get error if meas_date is not available.
+    # assert that we get an error if meas_date is not available.
     raw = read_raw_bids(bids_path=bids_path)
     raw.set_meas_date(None)
     anonymize_info(raw.info)
@@ -793,6 +829,51 @@ def test_find_empty_room(return_bids_test_dir, tmpdir):
     with pytest.raises(ValueError, match='The provided recording does not '
                                          'have a measurement date set'):
         bids_path.find_empty_room()
+
+    # test that the `AssociatedEmptyRoom` key in MEG sidecar is respected
+
+    bids_root = tmpdir.mkdir('associated-empty-room')
+    raw = _read_raw_fif(raw_fname)
+    meas_date = datetime(year=2020, month=1, day=10, tzinfo=timezone.utc)
+    er_date = datetime(year=2010, month=1, day=1, tzinfo=timezone.utc)
+    raw.set_meas_date(meas_date)
+
+    er_raw_matching_date = er_raw.copy().set_meas_date(meas_date)
+    er_raw_associated = er_raw.copy().set_meas_date(er_date)
+
+    # First write empty-room data
+    # We write two empty-room recordings: one with a date matching exactly the
+    # experimental measurement date, and one dated approx. 10 years earlier
+    # We will want to enforce using the older recording via
+    # `AssociatedEmptyRoom` (without AssociatedEmptyRoom, find_empty_room()
+    # would return the recording with the matching date instead)
+    er_matching_date_bids_path = BIDSPath(
+        subject='emptyroom', session='20200110', task='noise', root=bids_root,
+        datatype='meg', suffix='meg', extension='.fif')
+    write_raw_bids(er_raw_matching_date, bids_path=er_matching_date_bids_path)
+
+    er_associated_bids_path = (er_matching_date_bids_path.copy()
+                               .update(session='20100101'))
+    write_raw_bids(er_raw_associated, bids_path=er_associated_bids_path)
+
+    # Now we write experimental data and associate it with the earlier
+    # empty-room recording
+    bids_path = (er_matching_date_bids_path.copy()
+                 .update(subject='01', session=None, task='task'))
+    write_raw_bids(raw, bids_path=bids_path,
+                   empty_room=er_associated_bids_path)
+
+    # Retrieve empty-room BIDSPath
+    assert bids_path.find_empty_room() == er_associated_bids_path
+
+    # Should only work for MEG
+    with pytest.raises(ValueError, match='only supported for MEG'):
+        bids_path.copy().update(datatype='eeg').find_empty_room()
+
+    # Don't create `AssociatedEmptyRoom` entry in sidecar – we should now
+    # retrieve the empty-room recording closer in time
+    write_raw_bids(raw, bids_path=bids_path, empty_room=None, overwrite=True)
+    assert bids_path.find_empty_room() == er_matching_date_bids_path
 
 
 @pytest.mark.filterwarnings(warning_str['channel_unit_changed'])

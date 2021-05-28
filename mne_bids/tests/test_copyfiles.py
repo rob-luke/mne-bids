@@ -9,7 +9,6 @@ import datetime
 from distutils.version import LooseVersion
 
 import pytest
-from scipy.io import savemat
 
 # This is here to handle mne-python <0.20
 import warnings
@@ -21,7 +20,6 @@ with warnings.catch_warnings():
 
 from mne.datasets import testing
 from mne_bids import BIDSPath
-from mne_bids.utils import _handle_datatype
 from mne_bids.path import _parse_ext
 
 from mne_bids.copyfiles import (_get_brainvision_encoding,
@@ -185,7 +183,8 @@ def test_copyfile_edf(tmpdir):
 
 
 @pytest.mark.parametrize('fname',
-                         ('test_raw.set', 'test_raw_chanloc.set'))
+                         ('test_raw.set', 'test_raw_chanloc.set',
+                          'test_raw_2021.set'))
 def test_copyfile_eeglab(tmpdir, fname):
     """Test the copying of EEGlab set and fdt files."""
     if (fname == 'test_raw_chanloc.set' and
@@ -201,21 +200,15 @@ def test_copyfile_eeglab(tmpdir, fname):
     with pytest.raises(ValueError, match="Need to move data with same ext"):
         copyfile_eeglab(raw_fname, new_name + '.wrong')
 
-    # Bad .set file testing
-    with pytest.raises(ValueError, match='Could not find "EEG" field'):
-        fake_set = op.join(bids_root, 'fake.set')
-        savemat(fake_set, {'arr': [1, 2, 3]}, appendmat=False)
-        copyfile_eeglab(fake_set, new_name)
-
-    # Test copying and reading a combined set+fdt
+    # Test copying and reading
     copyfile_eeglab(raw_fname, new_name)
-    if fname == 'test_raw_chanloc.set':
+    if fname == 'test_raw_chanloc.set':  # combined set+fdt
         with pytest.warns(RuntimeWarning,
                           match="The data contains 'boundary' events"):
             raw = mne.io.read_raw_eeglab(new_name)
             assert 'Fp1' in raw.ch_names
-    else:
-        raw = mne.io.read_raw_eeglab(new_name)
+    else:  # combined set+fdt and single set (new EEGLAB format)
+        raw = mne.io.read_raw_eeglab(new_name, preload=True)
         assert 'EEG 001' in raw.ch_names
     assert isinstance(raw, mne.io.BaseRaw)
 
@@ -238,7 +231,8 @@ def test_copyfile_kit(tmpdir):
         raw_fname, mrk=hpi_fname, elp=electrode_fname,
         hsp=headshape_fname)
     _, ext = _parse_ext(raw_fname, verbose=True)
-    datatype = _handle_datatype(raw)
+
+    datatype = 'meg'  # copyfile_kit makes the same assumption
 
     bids_path = BIDSPath(
         subject=subject_id, session=session_id, run=run, acquisition=acq,

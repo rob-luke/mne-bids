@@ -12,6 +12,8 @@ from copy import deepcopy
 from os import path as op
 from pathlib import Path
 from datetime import datetime
+import json
+from typing import Optional, Union
 
 import numpy as np
 from mne.utils import warn, logger, _validate_type
@@ -26,7 +28,7 @@ from mne_bids.utils import (_check_key_val, _check_empty_room_basename,
                             param_regex, _ensure_tuple)
 
 
-def _get_matched_empty_room(bids_path):
+def _find_matched_empty_room(bids_path):
     """Get matching empty-room file for an MEG recording."""
     # Check whether we have a BIDS root.
     bids_root = bids_path.root
@@ -42,11 +44,7 @@ def _get_matched_empty_room(bids_path):
     bids_fname = bids_path.update(suffix=datatype,
                                   root=bids_root).fpath
     _, ext = _parse_ext(bids_fname)
-    extra_params = None
-    if ext == '.fif':
-        extra_params = dict(allow_maxshield=True)
-
-    raw = read_raw_bids(bids_path=bids_path, extra_params=extra_params)
+    raw = read_raw_bids(bids_path=bids_path)
     if raw.info['meas_date'] is None:
         raise ValueError('The provided recording does not have a measurement '
                          'date set. Cannot get matching empty-room file.')
@@ -165,19 +163,19 @@ class BIDSPath(object):
     subject : str | None
         The subject ID. Corresponds to "sub".
     session : str | None
-        The session for a item. Corresponds to "ses".
+        The acquisition session. Corresponds to "ses".
     task : str | None
-        The task for a item. Corresponds to "task".
+        The experimental task. Corresponds to "task".
     acquisition: str | None
-        The acquisition parameters for the item. Corresponds to "acq".
+        The acquisition parameters. Corresponds to "acq".
     run : int | None
-        The run number for this item. Corresponds to "run".
+        The run number. Corresponds to "run".
     processing : str | None
-        The processing label for this item. Corresponds to "proc".
+        The processing label. Corresponds to "proc".
     recording : str | None
-        The recording name for this item. Corresponds to "rec".
+        The recording name. Corresponds to "rec".
     space : str | None
-        The coordinate space for an anatomical or sensor position
+        The coordinate space for anatomical and sensor location
         files (e.g., ``*_electrodes.tsv``, ``*_markers.mrk``).
         Corresponds to "space".
         Note that valid values for ``space`` must come from a list
@@ -196,22 +194,20 @@ class BIDSPath(object):
     extension : str | None
         The extension of the filename. E.g., ``'.json'``.
     datatype : str
-        The "data type" of folder being created at the end of the folder
-        hierarchy. E.g., ``'anat'``, ``'func'``, ``'eeg'``, ``'meg'``,
-        ``'ieeg'``, etc.
+        The BIDS data type, e.g., ``'anat'``, ``'func'``, ``'eeg'``, ``'meg'``,
+        ``'ieeg'``.
     root : str | pathlib.Path | None
-        The root for the filename to be created. E.g., a path to the folder
-        in which you wish to create a file with this name.
+        The root directory of the BIDS dataset.
     check : bool
-        If True enforces the entities to be valid according to the
-        current BIDS standard. Defaults to True.
+        If ``True``, enforces BIDS conformity. Defaults to ``True``.
 
     Attributes
     ----------
     entities : dict
         The dictionary of the BIDS entities and their values:
         ``subject``, ``session``, ``task``, ``acquisition``,
-        ``run``, ``processing``, ``space``, ``recording`` and ``suffix``.
+        ``run``, ``processing``, ``space``, ``recording``, ``split``,
+        ``suffix``, and ``extension``.
     datatype : str | None
         The data type, i.e., one of ``'meg'``, ``'eeg'``, ``'ieeg'``,
         ``'anat'``.
@@ -224,15 +220,12 @@ class BIDSPath(object):
     fpath : pathlib.Path
         The full file path.
     check : bool
-        If ``True``, enforces the entities to be valid according to the
-        BIDS specification. The check is performed on instantiation
-        and any ``update`` function calls (and may be overridden in the
-        latter).
+        Whether to enforce BIDS conformity.
 
     Examples
     --------
     >>> bids_path = BIDSPath(subject='test', session='two', task='mytask',
-                                 suffix='ieeg', extension='.edf')
+                             suffix='ieeg', extension='.edf')
     >>> print(bids_path.basename)
     sub-test_ses-two_task-mytask_ieeg.edf
     >>> bids_path
@@ -240,7 +233,7 @@ class BIDSPath(object):
     basename: sub-test_ses-two_task-mytask_ieeg.edf)
     >>> # copy and update multiple entities at once
     >>> new_bids_path = bids_path.copy().update(subject='test2',
-                                                   session='one')
+                                                session='one')
     >>> print(new_bids_path.basename)
     sub-test2_ses-one_task-mytask_ieeg.edf
     >>> # printing the BIDSPath will show relative path when
@@ -265,15 +258,20 @@ class BIDSPath(object):
 
     Notes
     -----
-    BIDS entities are separated generally with a ``"_"`` character, while
-    entity key/value pairs are separated with a ``"-"`` character (e.g.
-    ``subject``, ``session``, ``task``, etc.). There are checks performed
-    to make sure that there are no ``'-'``, ``'_'``, or ``'/'`` characters
-    associated with any of these entities.
+    BIDS entities are generally separated with a ``"_"`` character, while
+    entity key/value pairs are separated with a ``"-"`` character.
+    There are checks performed to make sure that there are no ``'-'``, ``'_'``,
+    or ``'/'`` characters contained in any entity keys or values.
 
     To represent a filename such as ``dataset_description.json``,
     one can set ``check=False``, and pass ``suffix='dataset_description'``
     and ``extension='.json'``.
+
+    ``BIDSPath`` can also be used to represent file and folder names of data
+    types that are not yet supported through MNE-BIDS, but are recognized by
+    BIDS. For example, one can set ``datatype`` to ``dwi`` or ``func`` and
+    pass ``check=False`` to represent diffusion-weighted imaging and
+    functional MRI paths.
     """
 
     def __init__(self, subject=None, session=None,
@@ -359,6 +357,123 @@ class BIDSPath(object):
         if self.datatype is not None:
             data_path = op.join(data_path, self.datatype)
         return Path(data_path)
+
+    @property
+    def subject(self) -> Optional[str]:
+        """The subject ID."""
+        return self._subject
+
+    @subject.setter
+    def subject(self, value):
+        self.update(subject=value)
+
+    @property
+    def session(self) -> Optional[str]:
+        """The acquisition session."""
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self.update(session=value)
+
+    @property
+    def task(self) -> Optional[str]:
+        """The experimental task."""
+        return self._task
+
+    @task.setter
+    def task(self, value):
+        self.update(task=value)
+
+    @property
+    def run(self) -> Optional[str]:
+        """The run number."""
+        return self._run
+
+    @run.setter
+    def run(self, value):
+        self.update(run=value)
+
+    @property
+    def acquisition(self) -> Optional[str]:
+        """The acquisition parameters."""
+        return self._acquisition
+
+    @acquisition.setter
+    def acquisition(self, value):
+        self.update(acquisition=value)
+
+    @property
+    def processing(self) -> Optional[str]:
+        """The processing label."""
+        return self._processing
+
+    @processing.setter
+    def processing(self, value):
+        self.update(processing=value)
+
+    @property
+    def recording(self) -> Optional[str]:
+        """The recording name."""
+        return self._recording
+
+    @recording.setter
+    def recording(self, value):
+        self.update(recording=value)
+
+    @property
+    def space(self) -> Optional[str]:
+        """The coordinate space for an anatomical or sensor position file."""
+        return self._space
+
+    @space.setter
+    def space(self, value):
+        self.update(space=value)
+
+    @property
+    def suffix(self) -> Optional[str]:
+        """The filename suffix."""
+        return self._suffix
+
+    @suffix.setter
+    def suffix(self, value):
+        self.update(suffix=value)
+
+    @property
+    def root(self) -> Optional[Union[str, Path]]:
+        """The root directory of the BIDS dataset."""
+        return self._root
+
+    @root.setter
+    def root(self, value):
+        self.update(root=value)
+
+    @property
+    def datatype(self) -> Optional[str]:
+        """The BIDS data type, e.g. ``'anat'``, ``'meg'``, ``'eeg'``."""
+        return self._datatype
+
+    @datatype.setter
+    def datatype(self, value):
+        self.update(datatype=value)
+
+    @property
+    def split(self) -> Optional[str]:
+        """The split of the continuous recording file for ``.fif`` data."""
+        return self._split
+
+    @split.setter
+    def split(self, value):
+        self.update(split=value)
+
+    @property
+    def extension(self) -> Optional[str]:
+        """The extension of the filename, including a leading period."""
+        return self._extension
+
+    @extension.setter
+    def extension(self, value):
+        self.update(extension=value)
 
     def __str__(self):
         """Return the string representation of the path."""
@@ -515,15 +630,14 @@ class BIDSPath(object):
         Parameters
         ----------
         check : None | bool
-            If a boolean, controls whether to enforce the entities to be valid
-            according to the BIDS specification. This will set the
-            ``.check`` attribute accordingly. If ``None``, rely on the existing
-            ``.check`` attribute instead, which is set upon ``BIDSPath``
-            instantiation. Defaults to ``None``.
+            If a boolean, controls whether to enforce BIDS conformity. This
+            will set the ``.check`` attribute accordingly. If ``None``, rely on
+            the existing ``.check`` attribute instead, which is set upon
+            `mne_bids.BIDSPath` instantiation. Defaults to ``None``.
         **kwargs : dict
             It can contain updates for valid BIDS path entities:
             'subject', 'session', 'task', 'acquisition', 'processing', 'run',
-            'recording', 'space', 'suffix'
+            'recording', 'space', 'suffix', 'split', 'extension',
             or updates for 'root' or 'datatype'.
 
         Returns
@@ -557,7 +671,8 @@ class BIDSPath(object):
                 continue
 
             if key == 'datatype':
-                if val is not None and val not in ALLOWED_DATATYPES:
+                if val is not None and val not in ALLOWED_DATATYPES \
+                        and self.check:
                     raise ValueError(f'datatype ({val}) is not valid. '
                                      f'Should be one of '
                                      f'{ALLOWED_DATATYPES}')
@@ -600,22 +715,30 @@ class BIDSPath(object):
             # set entity value, ensuring `root` is a Path
             if val is not None and key == 'root':
                 val = Path(val).expanduser()
-            setattr(self, key, val)
+            setattr(self, f'_{key}', val)
 
         # infer datatype if suffix is uniquely the datatype
         if self.datatype is None and \
                 self.suffix in SUFFIX_TO_DATATYPE:
-            self.datatype = SUFFIX_TO_DATATYPE[self.suffix]
+            self._datatype = SUFFIX_TO_DATATYPE[self.suffix]
 
         # Perform a check of the entities.
         self._check()
         return self
 
-    def match(self):
+    def match(self, check=False):
         """Get a list of all matching paths in the root directory.
 
         Performs a recursive search, starting in ``.root`` (if set), based on
         `BIDSPath.entities` object. Ignores ``.json`` files.
+
+        Parameters
+        ----------
+        check : bool
+            If ``True``, only returns paths that conform to BIDS. If ``False``
+            (default), the ``.check`` attribute of the returned
+            `mne_bids.BIDSPath` object will be set to ``True`` for paths that
+            do conform to BIDS, and to ``False`` for those that don't.
 
         Returns
         -------
@@ -655,8 +778,25 @@ class BIDSPath(object):
             fpath = list(self.root.rglob(f'*{fname}*'))[0]
             datatype = _infer_datatype_from_path(fpath)
 
+            # to check whether the BIDSPath is conforming to BIDS if
+            # check=True, we first instantiate without checking and then run
+            # the check manually, allowing us to be more specific about the
+            # exception to catch
             bids_path = BIDSPath(root=self.root, datatype=datatype,
-                                 extension=extension, **entities)
+                                 extension=extension, check=False,
+                                 **entities)
+
+            bids_path.check = True
+
+            try:
+                bids_path._check()
+            except ValueError:
+                # path is not BIDS-compatible
+                if check:  # skip!
+                    continue
+                else:
+                    bids_path.check = False
+
             bids_paths.append(bids_path)
 
         return bids_paths
@@ -720,14 +860,49 @@ class BIDSPath(object):
         This will only work if the ``.root`` attribute of the
         :class:`mne_bids.BIDSPath` instance has been set.
 
+        .. note:: If the sidecar JSON file contains an ``AssociatedEmptyRoom``
+                  entry, the empty-room recording specified there will be used.
+                  Otherwise, this method will try to find the best-matching
+                  empty-room recording based on measurement date.
+
         Returns
         -------
         BIDSPath | None
             The path corresponding to the best-matching empty-room measurement.
-            Returns None if none was found.
-
+            Returns ``None`` if none was found.
         """
-        return _get_matched_empty_room(self)
+        if self.datatype not in ('meg', None):
+            raise ValueError('Empty-room data is only supported for MEG '
+                             'datasets')
+
+        if self.root is None:
+            raise ValueError('The root of the "bids_path" must be set. '
+                             'Please use `bids_path.update(root="<root>")` '
+                             'to set the root of the BIDS folder to read.')
+
+        sidecar_fname = _find_matching_sidecar(self, extension='.json')
+        with open(sidecar_fname, 'r', encoding='utf-8') as f:
+            sidecar_json = json.load(f)
+
+        if 'AssociatedEmptyRoom' in sidecar_json:
+            logger.info('Using "AssociatedEmptyRoom" entry from MEG sidecar '
+                        'file to retrieve empty-room path.')
+            emptytoom_path = sidecar_json['AssociatedEmptyRoom']
+            emptyroom_entities = get_entities_from_fname(emptytoom_path)
+            er_bids_path = BIDSPath(root=self.root, datatype='meg',
+                                    **emptyroom_entities)
+        else:
+            logger.info(
+                'The MEG sidecar file does not contain an '
+                '"AssociatedEmptyRoom" entry. Will try to find a matching '
+                'empty-room recording based on the measurement date …'
+            )
+            er_bids_path = _find_matched_empty_room(self)
+
+        if er_bids_path is not None:
+            assert er_bids_path.fpath.exists()
+
+        return er_bids_path
 
     @property
     def meg_calibration_fpath(self):
