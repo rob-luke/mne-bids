@@ -768,9 +768,9 @@ def _sidecar_json(raw, task, manufacturer, fname, datatype,
         ('ECGChannelCount', n_ecgchan),
         ('EMGChannelCount', n_emgchan),
         ('MiscChannelCount', n_miscchan),
-        ('NIRSCWChannelCount', n_nirscwchan),
-        ('NIRSCWSourceOptodeCount', n_nirscwsrc),
-        ('NIRSCWDetectorOptodeCount', n_nirscwdet),
+        ('NIRSChannelCount', n_nirscwchan),
+        ('NIRSSourceOptodeCount', n_nirscwsrc),
+        ('NIRSDetectorOptodeCount', n_nirscwdet),
         ('TriggerChannelCount', n_stimchan)]
 
     # Stitch together the complete JSON dictionary
