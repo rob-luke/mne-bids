@@ -273,7 +273,6 @@ def _infer_eeg_placement_scheme(raw):
         return placement_scheme
 
     # How many of the channels in raw are based on the extended 10/20 system
-    raw.load_data()
     sel = pick_types(raw.info, meg=False, eeg=True)
     ch_names = [raw.ch_names[i] for i in sel]
     channel_names = [ch.lower() for ch in ch_names]
@@ -382,7 +381,7 @@ def get_anonymization_daysback(raws):
     BIDS requires that anonymized dates be before 1925. In order to
     preserve the longitudinal structure and ensure anonymization, the
     user is asked to provide the same `daysback` argument to each call
-    of `write_raw_bids`. To determine the miniumum number of daysback
+    of `write_raw_bids`. To determine the minimum number of daysback
     necessary, this function will calculate the minimum number based on
     the most recent measurement date of raw objects.
 
