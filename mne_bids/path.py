@@ -1321,7 +1321,7 @@ def get_datatypes(root):
     # (Appendix in BIDS spec)
     # https://bids-specification.readthedocs.io/en/stable/99-appendices/04-entity-table.html  # noqa
     datatype_list = ('anat', 'func', 'dwi', 'fmap', 'beh',
-                     'meg', 'eeg', 'ieeg')
+                     'meg', 'eeg', 'ieeg', 'nirs')
     datatypes = list()
     for root, dirs, files in os.walk(root):
         for dir in dirs:
